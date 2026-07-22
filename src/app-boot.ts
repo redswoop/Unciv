@@ -11,7 +11,7 @@ import type { GameInfo } from "./save/types";
 import type { Ruleset } from "./ruleset/ruleset";
 import { buildBoardModel } from "./render/board-model";
 import { buildScene } from "./render/scene";
-import { MapCameraControls } from "./render/camera-controls";
+import { DIST_SCALE, MapCameraControls } from "./render/camera-controls";
 import { hexCornerVectors } from "./hex/hex-math";
 
 export interface AppOptions {
@@ -37,13 +37,37 @@ export async function bootApp(opts: AppOptions): Promise<void> {
     const ruleset = await opts.rulesetFor(game);
     status.textContent = "Building board…";
     const model = buildBoardModel(game, ruleset, hexCornerVectors());
-    const { scene, center, radius } = buildScene(model, opts.resolveTexture);
+    status.textContent = "Building terrain…";
+    const { scene, center, radius, civ5Terrain } = await buildScene(
+      model,
+      opts.resolveTexture,
+    );
 
     if (!renderer) {
       renderer = new THREE.WebGLRenderer({ antialias: true });
-      renderer.setPixelRatio(window.devicePixelRatio);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
       renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.outputColorSpace = THREE.SRGBColorSpace;
+      // gentle filmic curve — keeps digimaps from clipping under the sun
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.12;
       app.appendChild(renderer.domElement);
+    }
+    // dispose previous GPU resources when reloading a save
+    if (currentScene) {
+      currentScene.traverse((obj) => {
+        const mesh = obj as THREE.Mesh;
+        if (mesh.geometry) mesh.geometry.dispose();
+        const mat = mesh.material;
+        if (mat) {
+          const mats = Array.isArray(mat) ? mat : [mat];
+          for (const m of mats) {
+            const mm = m as THREE.MeshBasicMaterial;
+            if (mm.map) mm.map.dispose();
+            m.dispose();
+          }
+        }
+      });
     }
     currentScene = scene;
     controls = new MapCameraControls(
@@ -53,10 +77,15 @@ export async function bootApp(opts: AppOptions): Promise<void> {
       radius,
     );
     // reproducible framing via URL: ?x=..&y=..&dist=..&tilt=..
+    // `dist` is legacy FOV-45-equivalent coverage (scaled to MAP_FOV so old
+    // screenshot URLs keep the same framing). Pass distRaw=1 to use world units.
     const q = new URLSearchParams(location.search);
     if (q.has("x")) controls.target.x = Number(q.get("x"));
     if (q.has("y")) controls.target.y = Number(q.get("y"));
-    if (q.has("dist")) controls.distance = Number(q.get("dist"));
+    if (q.has("dist")) {
+      const d = Number(q.get("dist"));
+      controls.distance = q.get("distRaw") === "1" ? d : d * DIST_SCALE;
+    }
     if (q.has("tilt")) controls.tilt = Number(q.get("tilt"));
     controls.apply();
 
@@ -67,7 +96,8 @@ export async function bootApp(opts: AppOptions): Promise<void> {
     );
     document.getElementById("hud-title")!.textContent = `Turn ${model.turns}`;
     document.getElementById("hud-sub")!.textContent =
-      `${model.tiles.length} tiles · ${model.cities.length} cities · ${model.units.length} units · ruleset: ${ruleset.name}`;
+      `${model.tiles.length} tiles · ${model.cities.length} cities · ${model.units.length} units · ruleset: ${ruleset.name}` +
+      (civ5Terrain ? " · Firaxis digimaps" : " · Artful textures");
     document.getElementById("legend")!.innerHTML = civsWithCities
       .map(
         ([name, colors]) =>

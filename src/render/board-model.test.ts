@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { buildBoardModel, type BoardModel } from "./board-model";
+import { buildBoardModel, heightAtLocal, type BoardModel } from "./board-model";
 import { loadSaveFromFile } from "../save/load-save";
 import { baseRulesetForSave, readRulesetFromDisk } from "../ruleset/ruleset";
 import { hexCornerVectors } from "../hex/hex-math";
@@ -102,14 +102,44 @@ describe("board model from the REAL turn-518 save", () => {
   });
 
   test("relief: water flat, land raised, mountains highest", () => {
+    let maxMtn = 0;
+    let maxHill = 0;
+    let maxFlat = 0;
     for (const t of model.tiles) {
       if (t.baseTerrain === "Ocean" || t.baseTerrain === "Coast" || t.baseTerrain === "Lakes") {
         expect(t.height).toBe(0);
       } else if (t.baseTerrain === "Mountain") {
-        expect(t.height).toBeGreaterThan(1);
+        expect(t.height).toBeGreaterThan(0.25);
+        maxMtn = Math.max(maxMtn, t.height);
+      } else if (t.features.includes("Hill")) {
+        expect(t.height).toBeGreaterThan(0);
+        maxHill = Math.max(maxHill, t.height);
       } else {
         expect(t.height).toBeGreaterThan(0);
+        maxFlat = Math.max(maxFlat, t.height);
       }
+    }
+    // mountains dominate, hills sit above plains — soft hierarchy, not tents
+    expect(maxMtn).toBeGreaterThan(maxHill);
+    expect(maxHill).toBeGreaterThan(maxFlat);
+  });
+
+  test("relief: heightfield is a dome — interior above edge average on peaks", () => {
+    const corners = hexCornerVectors();
+    const mtns = model.tiles.filter((t) => t.baseTerrain === "Mountain").slice(0, 40);
+    expect(mtns.length).toBeGreaterThan(0);
+    for (const t of mtns) {
+      const edgeAvg =
+        t.cornerHeights.reduce((s, h) => s + h, 0) / t.cornerHeights.length;
+      // nonlinear falloff keeps center proud of the welded rim
+      expect(t.height).toBeGreaterThan(edgeAvg - 1e-6);
+      const mid = heightAtLocal(t.height, t.cornerHeights, corners, {
+        x: corners[0]!.x * 0.5,
+        y: corners[0]!.y * 0.5,
+      });
+      // mid-radius sits between center and rim
+      expect(mid).toBeLessThanOrEqual(t.height + 1e-6);
+      expect(mid).toBeGreaterThanOrEqual(Math.min(...t.cornerHeights) - 1e-6);
     }
   });
 

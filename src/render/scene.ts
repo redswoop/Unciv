@@ -5,23 +5,42 @@
  *  - Base terrain: ONE merged BufferGeometry per texture group, with
  *    world-space UVs so same-terrain neighbours read as continuous painted
  *    ground (the single biggest "Civ5 not spreadsheet" trick).
- *  - Relief: tile centers/corners carry elevations from the board model
- *    (corner heights are welded across neighbours), vertices are displaced
- *    in z, normals computed, and the ground is lit — hills and mountains
- *    are actual 3D bumps, not just texture.
- *  - Feature overlays: merged alpha-textured geometry per feature, draped
- *    on the same relief with a small z lift.
+ *  - Relief: each hex is a subdivided dome (RINGS rings) sampled from the
+ *    board-model heightfield (welded corners + nonlinear center falloff) so
+ *    hills roll and massifs merge instead of reading as 6-tri tents.
+ *  - Feature overlays: same subdivided mesh, draped with a small z lift.
  *  - Rivers/roads/borders: merged quad-strips draped on the relief.
  *  - Cities/units: THREE.Sprite billboards with canvas-drawn textures.
  */
 
 import * as THREE from "three";
 import { hexCornerVectors, type Vec2 } from "../hex/hex-math";
-import type { BoardModel, CivColors, EdgeSegment, RenderTile } from "./board-model";
+import {
+  heightAtLocal,
+  type BoardModel,
+  type CivColors,
+  type EdgeSegment,
+  type RenderTile,
+} from "./board-model";
+import {
+  civ5AssetsAvailable,
+  Civ5TileKit,
+  TILE_DIVS_FULLMAP,
+  type Civ5TileSpec,
+} from "./civ5-tiles";
 import assetMap from "./asset-map.json";
 
-const WORLD_UV_SCALE = 0.18; // world units -> texture repeats
+/**
+ * World units → texture repeats. ~0.42 ≈ one Artful digimap across ~2.4 hexes
+ * (hex diameter ~2); old 0.18 stretched a whole texture over ~5.5 units and
+ * read muddy/wrong at close zoom.
+ */
+const WORLD_UV_SCALE = 0.42;
 const LIFT = 0.02; // z offset between stacked layers on the same tile
+/** Subdivision rings per hex (3 → 1+6+12+18 = 37 verts, ~54 tris). */
+const HEX_RINGS = 3;
+/** Snow tint begins above this world-z on land. */
+const SNOW_LINE = 0.5;
 
 interface AssetEntry {
   texture?: string;
@@ -35,45 +54,117 @@ function rgb(c: [number, number, number]): THREE.Color {
 // ——————————————————— geometry helpers ———————————————————
 
 /**
- * Merged hex-fan geometry over tiles, displaced by tile elevations.
- * `overlap` scales the hexes slightly past their true edges so adjacent
- * texture groups seal against antialiasing cracks (pair with a per-group
- * z-epsilon to avoid z-fighting). World-space UVs.
+ * Merged subdivided-hex geometry over tiles, displaced by the smooth
+ * heightfield. Each of the 6 center→corner→corner sectors is a triangular
+ * grid of `divs` subdivisions (divs=3 → 9 tris/sector → 54 tris/tile).
+ * `overlap` scales past true edges to seal AA cracks between texture groups.
+ * World-space UVs. Optional vertex colors add snowcaps above SNOW_LINE.
  */
 function hexFanGeometry(
   tiles: readonly RenderTile[],
   corners: Vec2[],
   zBase: number,
   overlap = 1,
+  opts: { vertexColors?: boolean; divs?: number } = {},
 ): THREE.BufferGeometry {
-  const positions = new Float32Array(tiles.length * 18 * 3);
-  const uvs = new Float32Array(tiles.length * 18 * 2);
+  const divs = opts.divs ?? HEX_RINGS;
+  const useColor = opts.vertexColors ?? false;
+  // each sector: divs^2 small tris (standard triangle subdivision)
+  const tPer = 6 * divs * divs;
+  const positions = new Float32Array(tiles.length * tPer * 9);
+  const uvs = new Float32Array(tiles.length * tPer * 6);
+  const colors = useColor ? new Float32Array(tiles.length * tPer * 9) : null;
   let p = 0;
   let u = 0;
+  let col = 0;
+
   const push = (x: number, y: number, z: number) => {
     positions[p++] = x;
     positions[p++] = y;
     positions[p++] = z + zBase;
     uvs[u++] = x * WORLD_UV_SCALE;
     uvs[u++] = y * WORLD_UV_SCALE;
+    if (colors) {
+      let cr = 1;
+      let cg = 1;
+      let cb = 1;
+      if (z > SNOW_LINE) {
+        const s = Math.min(1, (z - SNOW_LINE) / 0.22);
+        cr = 1 * (1 - s) + 0.95 * s;
+        cg = 1 * (1 - s) + 0.97 * s;
+        cb = 1 * (1 - s) + 1.0 * s;
+      } else if (z < 0.02) {
+        cr = 0.96;
+        cg = 0.98;
+        cb = 1.0;
+      }
+      colors[col++] = cr;
+      colors[col++] = cg;
+      colors[col++] = cb;
+    }
   };
+
+  /** Local offset → world sample (undo overlap so heights stay seamless). */
+  const sample = (t: RenderTile, lx: number, ly: number): number =>
+    heightAtLocal(t.height, t.cornerHeights, corners, {
+      x: lx / overlap,
+      y: ly / overlap,
+    });
+
   for (const t of tiles) {
-    const c = t.world;
-    for (let i = 0; i < 6; i++) {
-      const a = corners[i]!;
-      const b = corners[(i + 1) % 6]!;
-      const za = t.cornerHeights[i]!;
-      const zb = t.cornerHeights[(i + 1) % 6]!;
-      // corners run clockwise on screen; emit center→b→a so triangles wind
-      // counter-clockwise (front-facing) when viewed from +Z
-      push(c.x, c.y, t.height);
-      push(c.x + b.x * overlap, c.y + b.y * overlap, zb);
-      push(c.x + a.x * overlap, c.y + a.y * overlap, za);
+    const cx = t.world.x;
+    const cy = t.world.y;
+    for (let s = 0; s < 6; s++) {
+      const a = corners[s]!;
+      const b = corners[(s + 1) % 6]!;
+      // sector corners in local (overlapped) space
+      const ax = a.x * overlap;
+      const ay = a.y * overlap;
+      const bx = b.x * overlap;
+      const by = b.y * overlap;
+
+      // Point on the subdivided triangle: (i,j) with i+j <= divs
+      // barycentric: w0=(divs-i-j)/divs, wa=i/divs, wb=j/divs → local = wa*A + wb*B
+      const point = (i: number, j: number): [number, number, number] => {
+        const lx = (i * ax + j * bx) / divs;
+        const ly = (i * ay + j * by) / divs;
+        return [cx + lx, cy + ly, sample(t, lx, ly)];
+      };
+
+      for (let i = 0; i < divs; i++) {
+        for (let j = 0; j < divs - i; j++) {
+          // upright tri: (i,j) (i+1,j) (i,j+1) — wind CCW from +Z
+          // corners clockwise → emit (i,j)→(i,j+1)→(i+1,j) = center-ish → B-dir → A-dir
+          {
+            const [x0, y0, z0] = point(i, j);
+            const [x1, y1, z1] = point(i, j + 1);
+            const [x2, y2, z2] = point(i + 1, j);
+            push(x0, y0, z0);
+            push(x1, y1, z1);
+            push(x2, y2, z2);
+          }
+          // inverted tri when it fits: (i+1,j) (i,j+1) (i+1,j+1)
+          if (j + 1 <= divs - i - 1) {
+            const [x0, y0, z0] = point(i + 1, j);
+            const [x1, y1, z1] = point(i, j + 1);
+            const [x2, y2, z2] = point(i + 1, j + 1);
+            push(x0, y0, z0);
+            push(x1, y1, z1);
+            push(x2, y2, z2);
+          }
+        }
+      }
     }
   }
+
+  // trim to actual fill (inverted-tri condition means we may have over-allocated)
+  // Count: per sector, upright = divs*(divs+1)/2, inverted = divs*(divs-1)/2, total = divs^2
+  // Our loops emit exactly divs^2 per sector — allocation is exact.
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  if (colors) geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
   geo.computeVertexNormals();
   return geo;
 }
@@ -225,22 +316,26 @@ export interface BuiltScene {
   scene: THREE.Scene;
   center: Vec2;
   radius: number;
+  /** true when Firaxis digimaps + piece heights were used for terrain */
+  civ5Terrain: boolean;
 }
 
-export function buildScene(
+export async function buildScene(
   model: BoardModel,
   /** Embedded builds map texture file names to data URIs; default fetches from public/. */
   resolveTexture: (file: string) => string = (file) => assetMap.pack.textureRoot + file,
-): BuiltScene {
+): Promise<BuiltScene> {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0b1626); // deep sea void beyond map edge
   const corners = hexCornerVectors();
   const loader = new THREE.TextureLoader();
 
-  // ——— lighting: sun from the south-east, soft ambient fill ———
-  scene.add(new THREE.AmbientLight(0xffffff, 0.62));
-  const sun = new THREE.DirectionalLight(0xfff4e0, 1.15);
-  sun.position.set(0.55, -0.45, 1.0).normalize();
+  // ——— lighting: Civ5-ish warm key + cool sky fill (low ambient so relief sculpts) ———
+  scene.add(new THREE.AmbientLight(0xc8d4e4, 0.22));
+  const hemi = new THREE.HemisphereLight(0xb8ccea, 0x5c4e32, 0.45);
+  scene.add(hemi);
+  const sun = new THREE.DirectionalLight(0xffe8c8, 1.75);
+  sun.position.set(0.85, -0.7, 0.55).normalize();
   scene.add(sun);
 
   const loadTex = (file: string): THREE.Texture => {
@@ -248,52 +343,72 @@ export function buildScene(
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
     tex.colorSpace = THREE.SRGBColorSpace;
+    tex.anisotropy = 8;
     return tex;
   };
 
-  // ——— base terrain groups (lit, displaced) ———
-  const baseMap = assetMap.baseTerrain as Record<string, AssetEntry>;
-  const groups = new Map<string, { tiles: RenderTile[]; tint?: [number, number, number] }>();
-  for (const tile of model.tiles) {
-    const entry = baseMap[tile.baseTerrain] ?? baseMap["*"]!;
-    const key = entry.texture!;
-    const g = groups.get(key) ?? { tiles: [] };
-    g.tiles.push(tile);
-    if (!baseMap[tile.baseTerrain]) g.tint = tile.terrainRGB; // unknown terrain: tint fallback texture
-    groups.set(key, g);
-  }
-  let groupIndex = 0;
-  for (const [texFile, group] of groups) {
-    // slight overlap + per-group z-epsilon: seals AA cracks between groups
-    const geo = hexFanGeometry(group.tiles, corners, groupIndex * 0.0004, 1.04);
-    const mat = new THREE.MeshLambertMaterial({ map: loadTex(texFile) });
-    if (group.tint) mat.color = rgb(group.tint);
-    scene.add(new THREE.Mesh(geo, mat));
-    groupIndex++;
-  }
-
-  // ——— feature overlays, draped on the same relief ———
-  const featMap = assetMap.features as Record<string, AssetEntry>;
-  const featGroups = new Map<string, RenderTile[]>();
-  for (const tile of model.tiles) {
-    for (const f of tile.features) {
-      const entry = featMap[f];
-      if (!entry?.texture) continue;
-      const arr = featGroups.get(f) ?? [];
-      arr.push(tile);
-      featGroups.set(f, arr);
+  // ——— terrain: prefer Firaxis digimaps + piece heightmaps when extracted ———
+  const useCiv5 = await civ5AssetsAvailable();
+  if (useCiv5) {
+    const kit = new Civ5TileKit();
+    await kit.init();
+    const specs: Civ5TileSpec[] = model.tiles.map((t) => ({
+      world: t.world,
+      baseTerrain: t.baseTerrain,
+      features: t.features,
+      key: t.key,
+    }));
+    const terrain = await kit.buildTerrainMesh(specs, { divs: TILE_DIVS_FULLMAP });
+    scene.add(terrain);
+  } else {
+    // Artful / procedural fallback (embedded build, or pre-extract)
+    const baseMap = assetMap.baseTerrain as Record<string, AssetEntry>;
+    const groups = new Map<string, { tiles: RenderTile[]; tint?: [number, number, number] }>();
+    for (const tile of model.tiles) {
+      const entry = baseMap[tile.baseTerrain] ?? baseMap["*"]!;
+      const key = entry.texture!;
+      const g = groups.get(key) ?? { tiles: [] };
+      g.tiles.push(tile);
+      if (!baseMap[tile.baseTerrain]) g.tint = tile.terrainRGB;
+      groups.set(key, g);
     }
-  }
-  for (const [feature, tiles] of featGroups) {
-    const entry = featMap[feature]!;
-    const z = LIFT + (entry.z ?? 1) * 0.004;
-    const geo = hexFanGeometry(tiles, corners, z);
-    const mat = new THREE.MeshLambertMaterial({
-      map: loadTex(entry.texture!),
-      transparent: true,
-      depthWrite: false,
-    });
-    scene.add(new THREE.Mesh(geo, mat));
+    let groupIndex = 0;
+    for (const [texFile, group] of groups) {
+      const geo = hexFanGeometry(group.tiles, corners, groupIndex * 0.0004, 1.03, {
+        vertexColors: true,
+      });
+      const mat = new THREE.MeshLambertMaterial({
+        map: loadTex(texFile),
+        vertexColors: true,
+      });
+      if (group.tint) mat.color = rgb(group.tint);
+      scene.add(new THREE.Mesh(geo, mat));
+      groupIndex++;
+    }
+
+    // Artful feature blobs (skip when Civ5 kit owns forest/jungle/hill look)
+    const featMap = assetMap.features as Record<string, AssetEntry>;
+    const featGroups = new Map<string, RenderTile[]>();
+    for (const tile of model.tiles) {
+      for (const f of tile.features) {
+        const entry = featMap[f];
+        if (!entry?.texture) continue;
+        const arr = featGroups.get(f) ?? [];
+        arr.push(tile);
+        featGroups.set(f, arr);
+      }
+    }
+    for (const [feature, tiles] of featGroups) {
+      const entry = featMap[feature]!;
+      const z = LIFT + (entry.z ?? 1) * 0.004;
+      const geo = hexFanGeometry(tiles, corners, z, 1, { vertexColors: false });
+      const mat = new THREE.MeshLambertMaterial({
+        map: loadTex(entry.texture!),
+        transparent: true,
+        depthWrite: false,
+      });
+      scene.add(new THREE.Mesh(geo, mat));
+    }
   }
 
   // ——— rivers ———
@@ -327,14 +442,15 @@ export function buildScene(
   }
   for (const [civ, tiles] of byCiv) {
     const colors = model.civColors.get(civ)!;
-    const geo = hexFanGeometry(tiles, corners, LIFT * 3);
+    // low-div territory wash — cheap translucent tint (quieter over digimaps)
+    const geo = hexFanGeometry(tiles, corners, LIFT * 3, 1, { divs: 1, vertexColors: false });
     scene.add(
       new THREE.Mesh(
         geo,
         new THREE.MeshBasicMaterial({
           color: rgb(colors.outer),
           transparent: true,
-          opacity: 0.14,
+          opacity: useCiv5 ? 0.08 : 0.12,
           depthWrite: false,
         }),
       ),
@@ -438,5 +554,5 @@ export function buildScene(
     model.bounds.maxX - model.bounds.minX,
     model.bounds.maxY - model.bounds.minY,
   ) / 2;
-  return { scene, center, radius };
+  return { scene, center, radius, civ5Terrain: useCiv5 };
 }

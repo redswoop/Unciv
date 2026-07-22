@@ -68,7 +68,10 @@ save file (base64+gzip, libGDX JSON)
 
 ## Visual quality backlog (the "looks kind of awful" list)
 
-Current state renders correct data but reads rough up close. Ranked by payoff:
+Camera FOV 16°, tilt 0.9. Full map uses **Firaxis digimaps + piece heightmaps**
+when `public/textures/civ5/` exists (`python3 cli/extract-civ5-assets.py` from
+local Steam Civ5); otherwise Artful fallback. Kit: `src/render/civ5-tiles.ts`.
+Chunk/hero demos: `/chunk.html`, `/hero.html`. Remaining gaps:
 
 1. **City banners are world-scaled sprites** — monstrous when zoomed in,
    overlapping when zoomed out. Fix: screen-space size cap (scale sprites by
@@ -79,20 +82,15 @@ Current state renders correct data but reads rough up close. Ranked by payoff:
 3. **Railroads/roads are chunky flat quads** — the dark crisscross reads as
    scribbles. Thinner width, dashed ties for rail, and route through edge
    midpoints (curve via city/tile centers) would read far better.
-4. **Mountains are single displaced spikes.** Better: displace a subdivided
-   fan (2-3 rings) with noise so massifs merge, plus snowcap tint above a
-   height threshold. `hexFanGeometry` currently emits 6 tris/tile only.
-5. **Unit markers are letter-initial billboards.** Even Civ5-style flag pins
+4. **Unit markers are letter-initial billboards.** Even Civ5-style flag pins
    (pole + banner icon shape) would read better; unit-type icon atlas later.
-6. **Water is flat opaque.** Cheap wins: animated normal-ish shimmer shader,
+5. **Water is flat opaque.** Cheap wins: animated normal-ish shimmer shader,
    coast-to-ocean gradient using the Artful depth LUT (already sampled in
    `cli/generate-textures.ts`), subtle foam ring on coastlines.
-7. **No fog of war** — everything is visible. Save carries per-civ
+6. **No fog of war** — everything is visible. Save carries per-civ
    `exploredTiles`; a "view as civ X" toggle + darkened unexplored tiles is
    pure board-model work.
-8. Hex texture tiling repeats visibly on large same-terrain fields
-   (`WORLD_UV_SCALE` in scene.ts); consider per-tile UV rotation (6 variants)
-   to break repetition.
+7. Per-tile UV rotation (6 variants) to further break large-field tiling.
 
 ## Distribution
 

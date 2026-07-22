@@ -1,20 +1,43 @@
 /**
- * Map camera: pan (drag / WASD), zoom-to-cursor (wheel), tilt (right-drag).
- * The camera looks at a target on the board plane (z=0) from a distance and
- * tilt angle — enough tilt to sell the Civ5 look, clamped so the board never
- * flips or goes edge-on.
+ * Map camera: pan (drag), zoom (wheel), tilt (right-drag).
+ *
+ * Tuned to read like Civ5's default map view: narrow FOV (mild perspective —
+ * hexes stay nearly constant size across the frame) with a mid-high lookdown
+ * angle so hill faces and mountain cliffs read as 3D form, not a top-down
+ * spreadsheet. Zoom dollies distance only; FOV stays fixed so zoom never
+ * reintroduces vanishing-point distortion.
+ *
+ * URL framing (reproducible screenshots): ?x=&y=&dist=&tilt=
+ * `dist` is camera-to-target distance in world units.
  */
 
 import * as THREE from "three";
 
+/** Vertical FOV in degrees. ~16° ≈ Civ5 mild perspective; 45° was "tabletop model". */
+export const MAP_FOV = 16;
+
+/**
+ * Multiply a "legacy" (FOV-45-era) distance by this to get the camera
+ * distance that covers the same board height at MAP_FOV.
+ *   visibleH = 2 * d * tan(fov/2)
+ */
+export const DIST_SCALE =
+  Math.tan(((45 / 2) * Math.PI) / 180) / Math.tan(((MAP_FOV / 2) * Math.PI) / 180);
+
 export class MapCameraControls {
   readonly camera: THREE.PerspectiveCamera;
   target: THREE.Vector2;
+  /** Camera-to-look-at distance (world units). */
   distance: number;
-  /** radians from straight-down; 0 = top-down */
-  tilt = 0.6;
-  private minDistance = 4;
+  /**
+   * Radians from straight-down (0 = top-down). Civ5 default sits around
+   * 0.85–0.95 so you see the south faces of relief.
+   */
+  tilt = 0.9;
+  private minDistance: number;
   private maxDistance: number;
+  private minTilt = 0.25;
+  private maxTilt = 1.1;
 
   private dragging: "pan" | "tilt" | null = null;
   private lastX = 0;
@@ -26,10 +49,13 @@ export class MapCameraControls {
     center: { x: number; y: number },
     boardRadius: number,
   ) {
-    this.camera = new THREE.PerspectiveCamera(45, aspect, 0.1, boardRadius * 10);
+    // far plane must clear the full board when camera is pulled back at narrow FOV
+    this.camera = new THREE.PerspectiveCamera(MAP_FOV, aspect, 0.2, boardRadius * 24);
     this.target = new THREE.Vector2(center.x, center.y);
-    this.distance = boardRadius * 1.35;
-    this.maxDistance = boardRadius * 3;
+    // default: most of the map in frame, same visual coverage as old FOV45 * 1.35
+    this.distance = boardRadius * 1.35 * DIST_SCALE;
+    this.minDistance = 3.5 * DIST_SCALE;
+    this.maxDistance = boardRadius * 3.2 * DIST_SCALE;
     this.apply();
 
     dom.addEventListener("pointerdown", this.onPointerDown);
@@ -75,7 +101,7 @@ export class MapCameraControls {
       this.target.x -= dx * s;
       this.target.y += dy * s * Math.cos(this.tilt);
     } else {
-      this.tilt = Math.min(1.15, Math.max(0.05, this.tilt + dy * 0.005));
+      this.tilt = Math.min(this.maxTilt, Math.max(this.minTilt, this.tilt + dy * 0.005));
     }
     this.apply();
   };

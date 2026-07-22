@@ -40,7 +40,7 @@ export interface RenderTile {
   improvement?: string;
   roadStatus?: "Road" | "Railroad";
   owner?: string;
-  /** terrain elevation at the tile center (world z) */
+  /** terrain elevation at the tile center (world z) — post-smoothing */
   height: number;
   /**
    * elevation at each hex corner, averaged over the tiles sharing that
@@ -144,7 +144,12 @@ export function edgeCorners(
   };
 }
 
-/** Terrain elevation model: water at sea level, land low, hills up, peaks high. */
+/**
+ * Raw per-tile elevation contribution (pre-smoothing).
+ * Tuned for Civ5-ish gentle relief: hills are broad bumps, mountains are
+ * rounded massifs — not 6-tri tent spikes. Absolute scale is world-z units
+ * (hex circumradius = 1).
+ */
 export function tileElevation(
   baseTerrain: string,
   features: string[],
@@ -152,10 +157,57 @@ export function tileElevation(
   naturalWonder?: string,
 ): number {
   if (isWater) return 0;
-  if (baseTerrain === "Mountain") return 1.1;
-  if (naturalWonder) return 0.6;
-  if (features.includes("Hill")) return 0.42;
-  return 0.09;
+  if (baseTerrain === "Mountain") return 0.78;
+  if (naturalWonder) return 0.42;
+  if (features.includes("Hill")) return 0.36;
+  // plains/grassland/desert/etc: low base, micro-relief added later
+  if (baseTerrain === "Snow" || baseTerrain === "Tundra") return 0.07;
+  return 0.05;
+}
+
+/** Deterministic [-1, 1] hash noise from integer hex coords. */
+export function hexNoise(hx: number, hy: number, salt = 0): number {
+  let h = Math.imul(hx | 0, 374761393) ^ Math.imul(hy | 0, 668265263) ^ Math.imul(salt, 962287);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 0x80000000 - 1; // roughly [-1, 1)
+}
+
+/**
+ * Height at a local offset inside a tile (local = world - tile.world).
+ * Uses sector barycentrics + a nonlinear falloff so peaks read as rounded
+ * domes rather than linear tents. Boundary (edge) heights depend only on
+ * welded corner heights → seamless across tiles.
+ */
+export function heightAtLocal(
+  centerH: number,
+  cornerHeights: readonly number[],
+  corners: readonly Vec2[],
+  local: Vec2,
+): number {
+  const r = Math.hypot(local.x, local.y);
+  if (r < 1e-10) return centerH;
+
+  for (let i = 0; i < 6; i++) {
+    const a = corners[i]!;
+    const b = corners[(i + 1) % 6]!;
+    // barycentric coords in triangle (origin, a, b)
+    const denom = a.x * b.y - a.y * b.x;
+    if (Math.abs(denom) < 1e-12) continue;
+    const wa = (local.x * b.y - local.y * b.x) / denom;
+    const wb = (a.x * local.y - a.y * local.x) / denom;
+    const w0 = 1 - wa - wb;
+    if (w0 >= -1e-5 && wa >= -1e-5 && wb >= -1e-5) {
+      const edgeW = Math.min(1, Math.max(0, wa + wb));
+      const hA = cornerHeights[i]!;
+      const hB = cornerHeights[(i + 1) % 6]!;
+      const hEdge = edgeW > 1e-12 ? (wa * hA + wb * hB) / edgeW : centerH;
+      // edgeW^1.55 keeps the dome broad near the center (Civ5 rolling feel)
+      const t = edgeW ** 1.55;
+      return centerH * (1 - t) + hEdge * t;
+    }
+  }
+  // outside hex (overlap skirt): clamp to nearest corner blend
+  return centerH;
 }
 
 export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[]): BoardModel {
@@ -184,11 +236,12 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
     }
   }
 
-  // ——— tiles ———
+  // ——— tiles (raw elevations) ———
   const tiles: RenderTile[] = [];
   const tileByKey = new Map<string, RenderTile>();
   const units: UnitMarker[] = [];
   const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
+  const rawHeight = new Map<string, number>();
 
   const riverEdges: { key: string; clock: number }[] = [];
   for (const tile of game.tileMap.tileList) {
@@ -197,6 +250,18 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
     const key = posKey(tile.position);
     const terrainDef = resolveTerrain(ruleset, tile.baseTerrain);
     const features = tileFeatures(tile);
+    const isWater = terrainDef?.type === "Water";
+    let elev = tileElevation(tile.baseTerrain, features, isWater, tile.naturalWonder);
+    // micro-relief so plains aren't dead-flat (water stays 0)
+    if (!isWater) {
+      const n = hexNoise(hex.x, hex.y, 7);
+      const n2 = hexNoise(hex.x, hex.y, 19);
+      if (tile.baseTerrain === "Mountain") elev += 0.07 * n + 0.03 * n2;
+      else if (features.includes("Hill")) elev += 0.05 * n + 0.025 * n2;
+      else elev += 0.028 * n + 0.012 * n2; // gentle rolling plains
+    }
+    rawHeight.set(key, elev);
+
     const rt: RenderTile = {
       key,
       hex,
@@ -212,12 +277,7 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       improvement: tile.improvement,
       roadStatus: tile.roadStatus === "Road" || tile.roadStatus === "Railroad" ? tile.roadStatus : undefined,
       owner: ownerByTile.get(key),
-      height: tileElevation(
-        tile.baseTerrain,
-        features,
-        terrainDef?.type === "Water",
-        tile.naturalWonder,
-      ),
+      height: elev, // replaced by smoothed value below
       cornerHeights: [0, 0, 0, 0, 0, 0],
     };
     tiles.push(rt);
@@ -240,9 +300,35 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
         name: unit.name,
         civ: owner,
         military: isMilitaryUnit(ruleset, unit.name),
-        z: rt.height,
+        z: elev, // patched after smooth
       });
     }
+  }
+
+  // ——— Laplacian smooth: blend each land tile with neighbours so massifs
+  // merge and hills roll instead of reading as isolated cones. Water locked. ———
+  for (const rt of tiles) {
+    const raw = rawHeight.get(rt.key)!;
+    if (raw === 0 && (rt.baseTerrain === "Ocean" || rt.baseTerrain === "Coast" || rt.baseTerrain === "Lakes")) {
+      rt.height = 0;
+      continue;
+    }
+    let sum = raw;
+    let w = 1;
+    for (const clock of NEIGHBOR_CLOCK_POSITIONS) {
+      const d = getClockPositionToHexcoord(clock);
+      const nKey = `${rt.hex.x + d.x},${rt.hex.y + d.y}`;
+      const nr = rawHeight.get(nKey);
+      if (nr === undefined) continue;
+      // water neighbours pull shores down gently; land neighbours blend
+      const nw = nr === 0 ? 0.55 : 0.45;
+      sum += nr * nw;
+      w += nw;
+    }
+    // keep a solid fraction of self so mountains don't dissolve
+    const selfW = rt.baseTerrain === "Mountain" ? 0.72 : 0.55;
+    const blended = sum / w;
+    rt.height = selfW * raw + (1 - selfW) * blended;
   }
 
   // ——— corner heights: average over the tiles sharing each corner ———
@@ -265,6 +351,19 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
         }
       }
       rt.cornerHeights[i] = sum / n;
+    }
+  }
+
+  // patch unit z to post-smooth tile height (created before laplacian pass)
+  {
+    let ui = 0;
+    for (const tile of game.tileMap.tileList) {
+      const rt = tileByKey.get(posKey(tile.position))!;
+      for (const unit of [tile.militaryUnit, tile.civilianUnit, ...(tile.airUnits ?? [])]) {
+        if (!unit?.name) continue;
+        if (ui < units.length) units[ui]!.z = rt.height;
+        ui++;
+      }
     }
   }
 

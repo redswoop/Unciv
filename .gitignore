@@ -3,3 +3,6 @@ dist/
 *.log
 .DS_Store
 dist-embedded/
+
+# Firaxis Civ5 extracts (local only, do not commit)
+public/textures/civ5/
