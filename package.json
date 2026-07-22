@@ -1,0 +1,22 @@
+{
+  "name": "civ5-look-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "POC web renderer: loads a real Unciv save file and draws its game state as a static, pannable, Civ5-style map in three.js. No engine changes.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "bun test",
+    "summary": "bun run cli/summarize-save.ts"
+  },
+  "dependencies": {
+    "three": "^0.166.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.166.0",
+    "typescript": "^5.5.0",
+    "vite": "^5.4.0"
+  }
+}
