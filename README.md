@@ -30,7 +30,7 @@ saves (`~/.local/share/Unciv/SaveFiles/…`) with the file picker.
 | 0 — Crack the data | `loadSave()` round-trips real saves: base64+gzip unwrap, **all three libGDX JSON dialects** (old saves are `OutputType.minimal` — unquoted keys *and* values) | `src/save/` |
 | 0 — Ruleset | Name→definition resolver over vendored base rulesets (terrains, resources, improvements, nations→colors, units) with miss-tolerant reporting | `src/ruleset/` |
 | 1 — Hex transform | **1:1 port of Unciv's `HexMath.kt`** (its own scheme: x = 10 o'clock, y = 2 o'clock, world = clock-vector combination). Tessellation invariants tested; 9919 tiles = exactly `getNumberOfTilesInHexagon(57)` | `src/hex/hex-math.ts` |
-| 2 — Terrain | Data-driven `asset-map.json` → merged per-texture hex geometry with **world-space UVs** (same-terrain neighbours read as continuous ground). Features layered by z-hint | `src/render/` |
+| 2 — Terrain | Data-driven `asset-map.json` → merged per-texture hex geometry with **world-space UVs** (same-terrain neighbours read as continuous ground). Features layered by z-hint. **3D relief**: per-tile elevations with corner heights welded across neighbours (symmetric averaging), vertex normals + directional lighting — mountains and hills are real geometry, and rivers/roads/borders/billboards drape onto it | `src/render/` |
 | 3 — Entities/borders | Cities & units as canvas-billboards in nation colors; territory from city `tiles` ownership; border edges where owner changes | `src/render/board-model.ts` |
 | 4 — Camera | Pan / zoom-to-distance / tilt, URL-parameterized framing for reproducible screenshots | `src/render/camera-controls.ts` |
 

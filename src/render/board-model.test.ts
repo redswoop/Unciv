@@ -80,6 +80,39 @@ describe("board model from the REAL turn-518 save", () => {
     expect(military).toBeLessThan(model.units.length); // some civilians too
   });
 
+  test("relief: welded corners — tiles sharing a corner agree on its height", () => {
+    // corner i of a tile coincides with corners of its neighbours; collect
+    // heights by rounded world position and assert they never disagree
+    const byPos = new Map<string, number>();
+    for (const t of model.tiles) {
+      for (let i = 0; i < 6; i++) {
+        const hour = [11, 1, 3, 5, 7, 9][i]!;
+        const angle = (2 * Math.PI * hour) / 12;
+        const x = t.world.x + Math.sin(angle);
+        const y = t.world.y + Math.cos(angle);
+        const key = `${x.toFixed(4)},${y.toFixed(4)}`;
+        const prev = byPos.get(key);
+        if (prev !== undefined) {
+          expect(Math.abs(prev - t.cornerHeights[i]!)).toBeLessThan(1e-9);
+        } else {
+          byPos.set(key, t.cornerHeights[i]!);
+        }
+      }
+    }
+  });
+
+  test("relief: water flat, land raised, mountains highest", () => {
+    for (const t of model.tiles) {
+      if (t.baseTerrain === "Ocean" || t.baseTerrain === "Coast" || t.baseTerrain === "Lakes") {
+        expect(t.height).toBe(0);
+      } else if (t.baseTerrain === "Mountain") {
+        expect(t.height).toBeGreaterThan(1);
+      } else {
+        expect(t.height).toBeGreaterThan(0);
+      }
+    }
+  });
+
   test("no shearing: tiles on the same latitude share exact world Y", () => {
     const byLat = new Map<number, number[]>();
     for (const t of model.tiles) {

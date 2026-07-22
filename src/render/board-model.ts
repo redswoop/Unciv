@@ -15,6 +15,7 @@ import {
   posX,
   posY,
   tileFeatures,
+  type CityData,
   type GameInfo,
   type TileData,
 } from "../save/types";
@@ -39,11 +40,22 @@ export interface RenderTile {
   improvement?: string;
   roadStatus?: "Road" | "Railroad";
   owner?: string;
+  /** terrain elevation at the tile center (world z) */
+  height: number;
+  /**
+   * elevation at each hex corner, averaged over the tiles sharing that
+   * corner — symmetric, so adjacent tiles produce identical corner heights
+   * and the relief mesh is seamless. Order matches hexCornerVectors().
+   */
+  cornerHeights: [number, number, number, number, number, number];
 }
 
 export interface EdgeSegment {
   a: Vec2;
   b: Vec2;
+  /** elevations at a and b (0 for flat maps) */
+  za: number;
+  zb: number;
 }
 
 export interface BorderSegment extends EdgeSegment {
@@ -55,6 +67,8 @@ export interface BorderSegment extends EdgeSegment {
 export interface RoadSegment {
   from: Vec2;
   to: Vec2;
+  zFrom: number;
+  zTo: number;
   kind: "Road" | "Railroad";
 }
 
@@ -63,6 +77,7 @@ export interface CityMarker {
   name: string;
   civ: string;
   population: number;
+  z: number;
 }
 
 export interface UnitMarker {
@@ -70,6 +85,7 @@ export interface UnitMarker {
   name: string;
   civ: string;
   military: boolean;
+  z: number;
 }
 
 export interface BoardModel {
@@ -111,14 +127,35 @@ const RIVER_EDGES: [keyof TileData, number][] = [
  * Corner pair bounding the edge that faces the given clock position.
  * hexCornerVectors() ordering: corner[i]..corner[i+1] face NEIGHBOR_CLOCK_POSITIONS[i].
  */
-export function edgeCorners(center: Vec2, clock: number, corners: Vec2[]): EdgeSegment {
+export function edgeCorners(
+  center: Vec2,
+  clock: number,
+  corners: Vec2[],
+  cornerHeights?: readonly number[],
+): EdgeSegment {
   const i = NEIGHBOR_CLOCK_POSITIONS.indexOf(clock as 12);
   const a = corners[i]!;
   const b = corners[(i + 1) % 6]!;
   return {
     a: { x: center.x + a.x, y: center.y + a.y },
     b: { x: center.x + b.x, y: center.y + b.y },
+    za: cornerHeights?.[i] ?? 0,
+    zb: cornerHeights?.[(i + 1) % 6] ?? 0,
   };
+}
+
+/** Terrain elevation model: water at sea level, land low, hills up, peaks high. */
+export function tileElevation(
+  baseTerrain: string,
+  features: string[],
+  isWater: boolean,
+  naturalWonder?: string,
+): number {
+  if (isWater) return 0;
+  if (baseTerrain === "Mountain") return 1.1;
+  if (naturalWonder) return 0.6;
+  if (features.includes("Hill")) return 0.42;
+  return 0.09;
 }
 
 export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[]): BoardModel {
@@ -126,6 +163,7 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
   const ownerByTile = new Map<string, string>();
   const civColors = new Map<string, CivColors>();
   const cities: CityMarker[] = [];
+  const pendingCities: { city: CityData; civName: string }[] = [];
 
   for (const civ of game.civilizations) {
     const civName = civ.civName ?? civ.civID ?? "?";
@@ -139,12 +177,7 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
           : fallbackColor(civName),
     );
     for (const city of civ.cities ?? []) {
-      cities.push({
-        world: hex2WorldCoords({ x: posX(city.location), y: posY(city.location) }),
-        name: city.name ?? "?",
-        civ: civName,
-        population: city.population?.population ?? 1,
-      });
+      pendingCities.push({ city, civName });
       // city center may or may not be listed in city.tiles; own it explicitly
       ownerByTile.set(posKey(city.location), civName);
       for (const t of city.tiles ?? []) ownerByTile.set(posKey(t), civName);
@@ -157,18 +190,20 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
   const units: UnitMarker[] = [];
   const bounds = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity };
 
+  const riverEdges: { key: string; clock: number }[] = [];
   for (const tile of game.tileMap.tileList) {
     const hex = { x: posX(tile.position), y: posY(tile.position) };
     const world = hex2WorldCoords(hex);
     const key = posKey(tile.position);
     const terrainDef = resolveTerrain(ruleset, tile.baseTerrain);
+    const features = tileFeatures(tile);
     const rt: RenderTile = {
       key,
       hex,
       world,
       baseTerrain: tile.baseTerrain,
       terrainRGB: terrainDef?.RGB,
-      features: tileFeatures(tile),
+      features,
       naturalWonder: tile.naturalWonder,
       resource: tile.resource,
       resourceType: tile.resource
@@ -177,6 +212,13 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       improvement: tile.improvement,
       roadStatus: tile.roadStatus === "Road" || tile.roadStatus === "Railroad" ? tile.roadStatus : undefined,
       owner: ownerByTile.get(key),
+      height: tileElevation(
+        tile.baseTerrain,
+        features,
+        terrainDef?.type === "Water",
+        tile.naturalWonder,
+      ),
+      cornerHeights: [0, 0, 0, 0, 0, 0],
     };
     tiles.push(rt);
     tileByKey.set(key, rt);
@@ -184,6 +226,10 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
     bounds.minY = Math.min(bounds.minY, world.y);
     bounds.maxX = Math.max(bounds.maxX, world.x);
     bounds.maxY = Math.max(bounds.maxY, world.y);
+
+    for (const [field, clock] of RIVER_EDGES) {
+      if (tile[field] === true) riverEdges.push({ key, clock });
+    }
 
     for (const unit of [tile.militaryUnit, tile.civilianUnit, ...(tile.airUnits ?? [])]) {
       if (!unit?.name) continue;
@@ -194,17 +240,50 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
         name: unit.name,
         civ: owner,
         military: isMilitaryUnit(ruleset, unit.name),
+        z: rt.height,
       });
     }
   }
 
-  // ——— rivers (each tile owns its three bottom edges) ———
-  const rivers: EdgeSegment[] = [];
-  for (const tile of game.tileMap.tileList) {
-    const world = hex2WorldCoords({ x: posX(tile.position), y: posY(tile.position) });
-    for (const [field, clock] of RIVER_EDGES) {
-      if (tile[field] === true) rivers.push(edgeCorners(world, clock, corners));
+  // ——— corner heights: average over the tiles sharing each corner ———
+  // corner[i] (hexCornerVectors order) is shared with the neighbours at
+  // clock positions NEIGHBOR_CLOCK_POSITIONS[(i+5)%6] and NEIGHBOR_CLOCK_POSITIONS[i].
+  // Averaging over the *existing* members of that trio is symmetric, so
+  // adjacent tiles compute identical heights for the shared corner.
+  for (const rt of tiles) {
+    for (let i = 0; i < 6; i++) {
+      const clockA = NEIGHBOR_CLOCK_POSITIONS[(i + 5) % 6]!;
+      const clockB = NEIGHBOR_CLOCK_POSITIONS[i]!;
+      let sum = rt.height;
+      let n = 1;
+      for (const clock of [clockA, clockB]) {
+        const d = getClockPositionToHexcoord(clock);
+        const neighbor = tileByKey.get(`${rt.hex.x + d.x},${rt.hex.y + d.y}`);
+        if (neighbor) {
+          sum += neighbor.height;
+          n++;
+        }
+      }
+      rt.cornerHeights[i] = sum / n;
     }
+  }
+
+  // ——— cities sit on their tile's elevation ———
+  for (const { city, civName } of pendingCities) {
+    cities.push({
+      world: hex2WorldCoords({ x: posX(city.location), y: posY(city.location) }),
+      name: city.name ?? "?",
+      civ: civName,
+      population: city.population?.population ?? 1,
+      z: tileByKey.get(posKey(city.location))?.height ?? 0,
+    });
+  }
+
+  // ——— rivers (each tile owns its three bottom edges), draped on relief ———
+  const rivers: EdgeSegment[] = [];
+  for (const { key, clock } of riverEdges) {
+    const rt = tileByKey.get(key)!;
+    rivers.push(edgeCorners(rt.world, clock, corners, rt.cornerHeights));
   }
 
   // ——— borders: owned tile edges where the neighbour owner differs ———
@@ -216,7 +295,11 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       const nKey = `${rt.hex.x + d.x},${rt.hex.y + d.y}`;
       const neighbor = tileByKey.get(nKey);
       if (neighbor?.owner !== rt.owner) {
-        borders.push({ ...edgeCorners(rt.world, clock, corners), civ: rt.owner, center: rt.world });
+        borders.push({
+          ...edgeCorners(rt.world, clock, corners, rt.cornerHeights),
+          civ: rt.owner,
+          center: rt.world,
+        });
       }
     }
   }
@@ -244,7 +327,13 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       const drawKind = kind === "Railroad" && nKind === "Railroad" ? "Railroad" : "Road";
       const neighbor = tileByKey.get(nKey);
       if (!neighbor) continue;
-      roads.push({ from: rt.world, to: neighbor.world, kind: drawKind });
+      roads.push({
+        from: rt.world,
+        to: neighbor.world,
+        zFrom: rt.height,
+        zTo: neighbor.height,
+        kind: drawKind,
+      });
     }
   }
 

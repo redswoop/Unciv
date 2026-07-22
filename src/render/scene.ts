@@ -5,17 +5,23 @@
  *  - Base terrain: ONE merged BufferGeometry per texture group, with
  *    world-space UVs so same-terrain neighbours read as continuous painted
  *    ground (the single biggest "Civ5 not spreadsheet" trick).
- *  - Feature overlays: merged alpha-textured geometry per feature, z-stacked.
- *  - Rivers/roads/borders: merged quad-strip geometries.
+ *  - Relief: tile centers/corners carry elevations from the board model
+ *    (corner heights are welded across neighbours), vertices are displaced
+ *    in z, normals computed, and the ground is lit — hills and mountains
+ *    are actual 3D bumps, not just texture.
+ *  - Feature overlays: merged alpha-textured geometry per feature, draped
+ *    on the same relief with a small z lift.
+ *  - Rivers/roads/borders: merged quad-strips draped on the relief.
  *  - Cities/units: THREE.Sprite billboards with canvas-drawn textures.
  */
 
 import * as THREE from "three";
 import { hexCornerVectors, type Vec2 } from "../hex/hex-math";
-import type { BoardModel, CivColors, EdgeSegment } from "./board-model";
+import type { BoardModel, CivColors, EdgeSegment, RenderTile } from "./board-model";
 import assetMap from "./asset-map.json";
 
 const WORLD_UV_SCALE = 0.18; // world units -> texture repeats
+const LIFT = 0.02; // z offset between stacked layers on the same tile
 
 interface AssetEntry {
   texture?: string;
@@ -29,50 +35,54 @@ function rgb(c: [number, number, number]): THREE.Color {
 // ——————————————————— geometry helpers ———————————————————
 
 /**
- * Merged hex-fan geometry for a set of tile centers, world-space UVs.
+ * Merged hex-fan geometry over tiles, displaced by tile elevations.
  * `overlap` scales the hexes slightly past their true edges so adjacent
  * texture groups seal against antialiasing cracks (pair with a per-group
- * z-epsilon to avoid z-fighting).
+ * z-epsilon to avoid z-fighting). World-space UVs.
  */
 function hexFanGeometry(
-  centers: Vec2[],
+  tiles: readonly RenderTile[],
   corners: Vec2[],
-  z: number,
+  zBase: number,
   overlap = 1,
 ): THREE.BufferGeometry {
-  const positions = new Float32Array(centers.length * 18 * 3);
-  const uvs = new Float32Array(centers.length * 18 * 2);
+  const positions = new Float32Array(tiles.length * 18 * 3);
+  const uvs = new Float32Array(tiles.length * 18 * 2);
   let p = 0;
   let u = 0;
-  const push = (x: number, y: number) => {
+  const push = (x: number, y: number, z: number) => {
     positions[p++] = x;
     positions[p++] = y;
-    positions[p++] = z;
+    positions[p++] = z + zBase;
     uvs[u++] = x * WORLD_UV_SCALE;
     uvs[u++] = y * WORLD_UV_SCALE;
   };
-  for (const c of centers) {
+  for (const t of tiles) {
+    const c = t.world;
     for (let i = 0; i < 6; i++) {
       const a = corners[i]!;
       const b = corners[(i + 1) % 6]!;
+      const za = t.cornerHeights[i]!;
+      const zb = t.cornerHeights[(i + 1) % 6]!;
       // corners run clockwise on screen; emit center→b→a so triangles wind
       // counter-clockwise (front-facing) when viewed from +Z
-      push(c.x, c.y);
-      push(c.x + b.x * overlap, c.y + b.y * overlap);
-      push(c.x + a.x * overlap, c.y + a.y * overlap);
+      push(c.x, c.y, t.height);
+      push(c.x + b.x * overlap, c.y + b.y * overlap, zb);
+      push(c.x + a.x * overlap, c.y + a.y * overlap, za);
     }
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
   geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+  geo.computeVertexNormals();
   return geo;
 }
 
-/** Merged quads along edge segments (rivers, borders). */
+/** Merged quads along edge segments (rivers, borders), draped on relief. */
 function segmentQuadGeometry(
   segments: EdgeSegment[],
   width: number,
-  z: number,
+  zBase: number,
   /** pull the quad toward this point (per segment), e.g. tile center for borders */
   insetToward?: Vec2[],
 ): THREE.BufferGeometry {
@@ -94,18 +104,19 @@ function segmentQuadGeometry(
         ny = -ny;
       }
     }
-    const ax = s.a.x;
-    const ay = s.a.y;
-    const bx = s.b.x;
-    const by = s.b.y;
-    const a2x = ax + nx * width;
-    const a2y = ay + ny * width;
-    const b2x = bx + nx * width;
-    const b2y = by + ny * width;
-    const quad = [ax, ay, bx, by, b2x, b2y, ax, ay, b2x, b2y, a2x, a2y];
-    for (let i = 0; i < quad.length; i += 2) {
-      positions[p++] = quad[i]!;
-      positions[p++] = quad[i + 1]!;
+    const za = s.za + zBase;
+    const zb = s.zb + zBase;
+    const quad: [number, number, number][] = [
+      [s.a.x, s.a.y, za],
+      [s.b.x, s.b.y, zb],
+      [s.b.x + nx * width, s.b.y + ny * width, zb],
+      [s.a.x, s.a.y, za],
+      [s.b.x + nx * width, s.b.y + ny * width, zb],
+      [s.a.x + nx * width, s.a.y + ny * width, za],
+    ];
+    for (const [x, y, z] of quad) {
+      positions[p++] = x;
+      positions[p++] = y;
       positions[p++] = z;
     }
   });
@@ -117,19 +128,6 @@ function segmentQuadGeometry(
 /** Winding of segment quads depends on segment direction — render both sides. */
 function flatMaterial(params: THREE.MeshBasicMaterialParameters): THREE.MeshBasicMaterial {
   return new THREE.MeshBasicMaterial({ ...params, side: THREE.DoubleSide });
-}
-
-/** Merged quads along center-to-center paths (roads). */
-function pathQuadGeometry(
-  paths: { from: Vec2; to: Vec2 }[],
-  width: number,
-  z: number,
-): THREE.BufferGeometry {
-  return segmentQuadGeometry(
-    paths.map((r) => ({ a: r.from, b: r.to })),
-    width,
-    z,
-  );
 }
 
 // ——————————————————— billboards ———————————————————
@@ -236,6 +234,12 @@ export function buildScene(model: BoardModel): BuiltScene {
   const loader = new THREE.TextureLoader();
   const pack = assetMap.pack.textureRoot;
 
+  // ——— lighting: sun from the south-east, soft ambient fill ———
+  scene.add(new THREE.AmbientLight(0xffffff, 0.62));
+  const sun = new THREE.DirectionalLight(0xfff4e0, 1.15);
+  sun.position.set(0.55, -0.45, 1.0).normalize();
+  scene.add(sun);
+
   const loadTex = (file: string): THREE.Texture => {
     const tex = loader.load(pack + file);
     tex.wrapS = THREE.RepeatWrapping;
@@ -244,44 +248,44 @@ export function buildScene(model: BoardModel): BuiltScene {
     return tex;
   };
 
-  // ——— base terrain groups ———
+  // ——— base terrain groups (lit, displaced) ———
   const baseMap = assetMap.baseTerrain as Record<string, AssetEntry>;
-  const groups = new Map<string, { centers: Vec2[]; tint?: [number, number, number] }>();
+  const groups = new Map<string, { tiles: RenderTile[]; tint?: [number, number, number] }>();
   for (const tile of model.tiles) {
     const entry = baseMap[tile.baseTerrain] ?? baseMap["*"]!;
     const key = entry.texture!;
-    const g = groups.get(key) ?? { centers: [] };
-    g.centers.push(tile.world);
+    const g = groups.get(key) ?? { tiles: [] };
+    g.tiles.push(tile);
     if (!baseMap[tile.baseTerrain]) g.tint = tile.terrainRGB; // unknown terrain: tint fallback texture
     groups.set(key, g);
   }
   let groupIndex = 0;
   for (const [texFile, group] of groups) {
     // slight overlap + per-group z-epsilon: seals AA cracks between groups
-    const geo = hexFanGeometry(group.centers, corners, groupIndex * 0.0004, 1.04);
-    const mat = new THREE.MeshBasicMaterial({ map: loadTex(texFile) });
+    const geo = hexFanGeometry(group.tiles, corners, groupIndex * 0.0004, 1.04);
+    const mat = new THREE.MeshLambertMaterial({ map: loadTex(texFile) });
     if (group.tint) mat.color = rgb(group.tint);
     scene.add(new THREE.Mesh(geo, mat));
     groupIndex++;
   }
 
-  // ——— feature overlays ———
+  // ——— feature overlays, draped on the same relief ———
   const featMap = assetMap.features as Record<string, AssetEntry>;
-  const featGroups = new Map<string, Vec2[]>();
+  const featGroups = new Map<string, RenderTile[]>();
   for (const tile of model.tiles) {
     for (const f of tile.features) {
       const entry = featMap[f];
       if (!entry?.texture) continue;
       const arr = featGroups.get(f) ?? [];
-      arr.push(tile.world);
+      arr.push(tile);
       featGroups.set(f, arr);
     }
   }
-  for (const [feature, centers] of featGroups) {
+  for (const [feature, tiles] of featGroups) {
     const entry = featMap[feature]!;
-    const z = 0.01 + (entry.z ?? 1) * 0.004;
-    const geo = hexFanGeometry(centers, corners, z);
-    const mat = new THREE.MeshBasicMaterial({
+    const z = LIFT + (entry.z ?? 1) * 0.004;
+    const geo = hexFanGeometry(tiles, corners, z);
+    const mat = new THREE.MeshLambertMaterial({
       map: loadTex(entry.texture!),
       transparent: true,
       depthWrite: false,
@@ -291,12 +295,9 @@ export function buildScene(model: BoardModel): BuiltScene {
 
   // ——— rivers ———
   if (model.rivers.length > 0) {
-    const geo = segmentQuadGeometry(model.rivers, assetMap.rivers.width, 0.05);
+    const geo = segmentQuadGeometry(model.rivers, assetMap.rivers.width, LIFT * 2.4);
     scene.add(
-      new THREE.Mesh(
-        geo,
-        flatMaterial({ color: new THREE.Color(assetMap.rivers.color) }),
-      ),
+      new THREE.Mesh(geo, flatMaterial({ color: new THREE.Color(assetMap.rivers.color) })),
     );
   }
 
@@ -305,21 +306,25 @@ export function buildScene(model: BoardModel): BuiltScene {
     const segs = model.roads.filter((r) => r.kind === kind);
     if (segs.length === 0) continue;
     const spec = assetMap.roads[kind];
-    const geo = pathQuadGeometry(segs, spec.width, 0.055);
+    const geo = segmentQuadGeometry(
+      segs.map((r) => ({ a: r.from, b: r.to, za: r.zFrom, zb: r.zTo })),
+      spec.width,
+      LIFT * 2.6,
+    );
     scene.add(new THREE.Mesh(geo, flatMaterial({ color: new THREE.Color(spec.color) })));
   }
 
   // ——— territory fill + borders ———
-  const byCiv = new Map<string, Vec2[]>();
+  const byCiv = new Map<string, RenderTile[]>();
   for (const tile of model.tiles) {
     if (!tile.owner) continue;
     const arr = byCiv.get(tile.owner) ?? [];
-    arr.push(tile.world);
+    arr.push(tile);
     byCiv.set(tile.owner, arr);
   }
-  for (const [civ, centers] of byCiv) {
+  for (const [civ, tiles] of byCiv) {
     const colors = model.civColors.get(civ)!;
-    const geo = hexFanGeometry(centers, corners, 0.06);
+    const geo = hexFanGeometry(tiles, corners, LIFT * 3);
     scene.add(
       new THREE.Mesh(
         geo,
@@ -341,7 +346,7 @@ export function buildScene(model: BoardModel): BuiltScene {
   }
   for (const [civ, { segs, centers }] of borderByCiv) {
     const colors = model.civColors.get(civ)!;
-    const geo = segmentQuadGeometry(segs, assetMap.borders.width, 0.065, centers);
+    const geo = segmentQuadGeometry(segs, assetMap.borders.width, LIFT * 3.2, centers);
     scene.add(new THREE.Mesh(geo, flatMaterial({ color: rgb(colors.outer) })));
   }
 
@@ -369,20 +374,20 @@ export function buildScene(model: BoardModel): BuiltScene {
       128,
     );
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
-    sprite.position.set(t.world.x, t.world.y, 0.4);
+    sprite.position.set(t.world.x, t.world.y, t.height + 0.4);
     sprite.scale.set(0.9, 0.9, 1);
     scene.add(sprite);
   }
 
   // ——— resource / improvement markers (small, subtle) ———
   const resSpecs = assetMap.resources as Record<string, { markerColor: string }>;
-  const resGroups = new Map<string, Vec2[]>();
+  const resGroups = new Map<string, { x: number; y: number; z: number }[]>();
   for (const t of model.tiles) {
     if (!t.resource) continue;
     const kind = t.resourceType ?? "Bonus";
     const arr = resGroups.get(kind) ?? [];
     // offset marker to top-left of tile so it doesn't collide with units
-    arr.push({ x: t.world.x - 0.45, y: t.world.y + 0.45 });
+    arr.push({ x: t.world.x - 0.45, y: t.world.y + 0.45, z: t.height + LIFT * 3 });
     resGroups.set(kind, arr);
   }
   for (const [kind, centers] of resGroups) {
@@ -390,7 +395,7 @@ export function buildScene(model: BoardModel): BuiltScene {
     const geo = new THREE.CircleGeometry(0.16, 12);
     const mesh = new THREE.InstancedMesh(geo, new THREE.MeshBasicMaterial({ color }), centers.length);
     const m = new THREE.Matrix4();
-    centers.forEach((c, i) => mesh.setMatrixAt(i, m.makeTranslation(c.x, c.y, 0.07)));
+    centers.forEach((c, i) => mesh.setMatrixAt(i, m.makeTranslation(c.x, c.y, c.z)));
     scene.add(mesh);
   }
 
@@ -407,7 +412,7 @@ export function buildScene(model: BoardModel): BuiltScene {
     const sprite = new THREE.Sprite(
       new THREE.SpriteMaterial({ map: tex, depthTest: false }),
     );
-    sprite.position.set(u.world.x + (u.military ? -0.25 : 0.3), u.world.y - 0.15, 0.5);
+    sprite.position.set(u.world.x + (u.military ? -0.25 : 0.3), u.world.y - 0.15, u.z + 0.5);
     sprite.scale.set(0.85, 0.85, 1);
     scene.add(sprite);
   }
@@ -417,7 +422,7 @@ export function buildScene(model: BoardModel): BuiltScene {
     const colors = model.civColors.get(c.civ)!;
     const tex = cityBannerTexture(c.name, c.population, colors);
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
-    sprite.position.set(c.world.x, c.world.y + 0.55, 0.6);
+    sprite.position.set(c.world.x, c.world.y + 0.55, c.z + 0.6);
     sprite.scale.set(4.6, 1.44, 1);
     scene.add(sprite);
   }
