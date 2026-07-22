@@ -5,8 +5,8 @@ import { summarizeGame } from "./game-summary";
 import { posKey, tileFeatures } from "./types";
 import { getDistance } from "../hex/hex-math";
 
-const SAVE = join(import.meta.dir, "../../saves/turn518-14civs.unciv");
-const SAVE2 = join(import.meta.dir, "../../saves/turn206-huge.unciv");
+const SAVE = join(import.meta.dir, "../../public/saves/turn518-14civs.unciv");
+const SAVE2 = join(import.meta.dir, "../../public/saves/turn206-huge.unciv");
 
 describe("loadSave against a REAL archived multiplayer save (turn 518)", () => {
   test("parses and passes basic sanity", async () => {

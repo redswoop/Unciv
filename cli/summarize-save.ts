@@ -6,6 +6,6 @@
 import { loadSaveFromFile } from "../src/save/load-save";
 import { formatSummary, summarizeGame } from "../src/save/game-summary";
 
-const path = process.argv[2] ?? "saves/turn518-14civs.unciv";
+const path = process.argv[2] ?? "public/saves/turn518-14civs.unciv";
 const game = await loadSaveFromFile(path);
 console.log(formatSummary(summarizeGame(game)));
