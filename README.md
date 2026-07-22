@@ -39,16 +39,23 @@ transformation. The renderer holds no game knowledge; the model holds no three.j
 
 ## Texture pack: Artful Terrain Textures
 
-The chosen reskin is Rajul's
+The reskin is Rajul's
 [Artful Terrain Textures](https://forums.civfanatics.com/resources/artful-terrain-textures.30689/)
-(Civ5 pseudo-DLC). CivFanatics sits behind a bot-check this environment can't
-pass, so `public/textures/artful/*.png` currently holds **procedural stand-ins
-generated under the pack's taxonomy** (`cli/generate-textures.ts`).
+(Civ5 pseudo-DLC, DXT5 DDS). `cli/convert-artful.py` converts the pack's
+terrain textures into the renderer's asset slots (Europe regional variants by
+default):
 
-To swap in the real pack: convert its DDS terrain textures to PNG and drop them
-over the same filenames (`grassland.png`, `plains.png`, `desert.png`,
-`tundra.png`, `snow.png`, `mountain.png`, …). `src/render/asset-map.json` is the
-single mapping point — **asset swapping is config, not code.**
+```bash
+python3 cli/convert-artful.py "/path/to/Artful Textures"   # needs Pillow
+bun run cli/generate-textures.ts                            # fills uncovered slots
+```
+
+Nine slots are real pack conversions (grassland, plains, desert, tundra, snow,
+mountain, marsh, flood-plains, oasis). Slots the pack doesn't cover as flat
+tiles (forest, jungle, hill, ice, atoll, fallout, water) are procedural, with
+the water palette sampled from the pack's `waterdepthcolor_new.dds` LUT.
+`src/render/asset-map.json` is the single mapping point — **asset swapping is
+config, not code** (proven: the stand-in→real swap changed zero renderer lines).
 
 ## Docs
 

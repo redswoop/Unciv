@@ -159,9 +159,9 @@ const writes: [string, Uint8Array][] = [
   ["desert", ground({ name: "desert", dark: [196, 168, 116], light: [232, 210, 156], speckle: { color: [176, 146, 96], p: 0.03 } }, 3)],
   ["tundra", ground({ name: "tundra", dark: [116, 116, 96], light: [158, 156, 128], speckle: { color: [196, 200, 190], p: 0.06 } }, 4)],
   ["snow", ground({ name: "snow", dark: [206, 214, 224], light: [242, 246, 250] }, 5)],
-  ["ocean", ground({ name: "ocean", dark: [18, 54, 96], light: [34, 82, 130] }, 6)],
-  ["coast", ground({ name: "coast", dark: [42, 106, 148], light: [80, 152, 186], speckle: { color: [130, 190, 200], p: 0.04 } }, 7)],
-  ["lakes", ground({ name: "lakes", dark: [52, 118, 160], light: [96, 164, 198] }, 8)],
+  ["ocean", ground({ name: "ocean", dark: [7, 22, 70], light: [26, 52, 100] }, 6)], // Artful waterdepthcolor deep end
+  ["coast", ground({ name: "coast", dark: [40, 92, 130], light: [56, 128, 158], speckle: { color: [100, 168, 190], p: 0.04 } }, 7)], // Artful waterdepthcolor shallow end
+  ["lakes", ground({ name: "lakes", dark: [48, 108, 142], light: [70, 140, 170] }, 8)], // Artful waterdepthcolor shallowest band
   ["mountain", ground({ name: "mountain", dark: [88, 84, 82], light: [150, 146, 142], speckle: { color: [220, 222, 224], p: 0.08 } }, 9)],
   ["fallout-ground", ground({ name: "fallout", dark: [70, 84, 38], light: [112, 128, 52], speckle: { color: [150, 168, 60], p: 0.1 } }, 10)],
   // ——— feature overlays (alpha) ———
@@ -176,8 +176,15 @@ const writes: [string, Uint8Array][] = [
   ["fallout", blobOverlay([90, 110, 30], [140, 160, 40], 1.0, [8, 16], 29, 0.55)],
 ];
 
+// Never clobber real pack conversions (cli/convert-artful.py output):
+// only fill missing files unless --force is given.
+const force = process.argv.includes("--force");
 for (const [name, rgba] of writes) {
   const path = join(OUT, `${name}.png`);
+  if (!force && (await Bun.file(path).exists())) {
+    console.log("kept ", path);
+    continue;
+  }
   await Bun.write(path, encodePng(SIZE, SIZE, rgba));
   console.log("wrote", path);
 }
