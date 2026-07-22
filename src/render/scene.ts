@@ -227,12 +227,15 @@ export interface BuiltScene {
   radius: number;
 }
 
-export function buildScene(model: BoardModel): BuiltScene {
+export function buildScene(
+  model: BoardModel,
+  /** Embedded builds map texture file names to data URIs; default fetches from public/. */
+  resolveTexture: (file: string) => string = (file) => assetMap.pack.textureRoot + file,
+): BuiltScene {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0b1626); // deep sea void beyond map edge
   const corners = hexCornerVectors();
   const loader = new THREE.TextureLoader();
-  const pack = assetMap.pack.textureRoot;
 
   // ——— lighting: sun from the south-east, soft ambient fill ———
   scene.add(new THREE.AmbientLight(0xffffff, 0.62));
@@ -241,7 +244,7 @@ export function buildScene(model: BoardModel): BuiltScene {
   scene.add(sun);
 
   const loadTex = (file: string): THREE.Texture => {
-    const tex = loader.load(pack + file);
+    const tex = loader.load(resolveTexture(file));
     tex.wrapS = THREE.RepeatWrapping;
     tex.wrapT = THREE.RepeatWrapping;
     tex.colorSpace = THREE.SRGBColorSpace;
