@@ -35,6 +35,8 @@ export async function bootApp(opts: AppOptions): Promise<void> {
   let renderer: THREE.WebGLRenderer | null = null;
   let controls: MapCameraControls | null = null;
   let currentScene: THREE.Scene | null = null;
+  let sceneUpdate: ((camera: THREE.PerspectiveCamera, viewportHeightPx: number) => void) | null =
+    null;
   let picker: TilePicker | null = null;
   let infoIndex: TileInfoIndex | null = null;
 
@@ -44,10 +46,11 @@ export async function bootApp(opts: AppOptions): Promise<void> {
     status.textContent = "Building board…";
     const model = buildBoardModel(game, ruleset, hexCornerVectors());
     status.textContent = "Building terrain…";
-    const { scene, center, radius, civ5Terrain } = await buildScene(
+    const { scene, center, radius, civ5Terrain, update } = await buildScene(
       model,
       opts.resolveTexture,
     );
+    sceneUpdate = update ?? null;
 
     if (!renderer) {
       renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -134,6 +137,7 @@ export async function bootApp(opts: AppOptions): Promise<void> {
   function loop(): void {
     requestAnimationFrame(loop);
     if (renderer && controls && currentScene) {
+      sceneUpdate?.(controls.camera, renderer.domElement.clientHeight);
       renderer.render(currentScene, controls.camera);
     }
   }

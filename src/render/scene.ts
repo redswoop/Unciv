@@ -28,6 +28,15 @@ import {
   TILE_DIVS_FULLMAP,
   type Civ5TileSpec,
 } from "./civ5-tiles";
+import {
+  buildImprovementDecals,
+  buildNaturalWonderArt,
+  buildResourceBubbles,
+  civ5OverlayArtAvailable,
+  type BubbleLayer,
+  type GroundZ,
+  type OverlayTile,
+} from "./civ5-overlays";
 import assetMap from "./asset-map.json";
 
 /**
@@ -318,6 +327,8 @@ export interface BuiltScene {
   radius: number;
   /** true when Firaxis digimaps + piece heights were used for terrain */
   civ5Terrain: boolean;
+  /** call once per frame (screen-sized icon layers etc.) */
+  update?: (camera: THREE.PerspectiveCamera, viewportHeightPx: number) => void;
 }
 
 export async function buildScene(
@@ -349,6 +360,9 @@ export async function buildScene(
 
   // ——— terrain: prefer Firaxis digimaps + piece heightmaps when extracted ———
   const useCiv5 = await civ5AssetsAvailable();
+  let overlayGroundZ: GroundZ | null = null;
+  let overlayTiles: OverlayTile[] = [];
+  let overlayArt = false;
   if (useCiv5) {
     const kit = new Civ5TileKit();
     await kit.init();
@@ -360,12 +374,29 @@ export async function buildScene(
       // welded low-freq relief so hills/mountains merge; piece heights add detail
       height: t.height,
       cornerHeights: t.cornerHeights,
+      clearBubble: t.resource !== undefined,
+      clearCenter: t.improvement !== undefined,
+      suppressPiece: t.naturalWonder !== undefined,
     }));
     const terrain = await kit.buildTerrainMesh(specs, {
       divs: TILE_DIVS_FULLMAP,
       foliage: "full",
     });
     scene.add(terrain);
+
+    // on-map art overlays sample the kit's rendered surface heights
+    const specByKey = new Map(specs.map((s) => [s.key, s]));
+    overlayGroundZ = (t, lx, ly) => kit.groundZ(specByKey.get(t.key)!, lx, ly);
+    overlayTiles = model.tiles.map((t) => ({
+      world: t.world,
+      key: t.key,
+      baseTerrain: t.baseTerrain,
+      features: t.features,
+      resource: t.resource,
+      improvement: t.improvement,
+      naturalWonder: t.naturalWonder,
+    }));
+    overlayArt = await civ5OverlayArtAvailable();
   } else {
     // Artful / procedural fallback (embedded build, or pre-extract)
     const baseMap = assetMap.baseTerrain as Record<string, AssetEntry>;
@@ -475,8 +506,22 @@ export async function buildScene(
     scene.add(new THREE.Mesh(geo, flatMaterial({ color: rgb(colors.outer) })));
   }
 
-  // ——— natural wonder markers ———
-  const wonderTiles = model.tiles.filter((t) => t.naturalWonder);
+  // ——— on-map Civ5 art: resource icon layer, improvement decals, wonder art ———
+  let bubbleLayer: BubbleLayer | null = null;
+  if (overlayArt && overlayGroundZ) {
+    const [res, impDecals, wonders] = await Promise.all([
+      buildResourceBubbles(overlayTiles, overlayGroundZ),
+      buildImprovementDecals(overlayTiles, overlayGroundZ),
+      buildNaturalWonderArt(overlayTiles, overlayGroundZ),
+    ]);
+    scene.add(impDecals);
+    scene.add(res.layer.group);
+    scene.add(wonders);
+    bubbleLayer = res.layer;
+  }
+
+  // ——— natural wonder markers (fallback when Civ5 art is absent) ———
+  const wonderTiles = overlayArt ? [] : model.tiles.filter((t) => t.naturalWonder);
   for (const t of wonderTiles) {
     const tex = canvasSprite(
       (ctx, w, h) => {
@@ -508,10 +553,10 @@ export async function buildScene(
     scene.add(sprite);
   }
 
-  // ——— resource / improvement markers (small, subtle) ———
+  // ——— resource / improvement markers (fallback when Civ5 art is absent) ———
   const resSpecs = assetMap.resources as Record<string, { markerColor: string }>;
   const resGroups = new Map<string, { x: number; y: number; z: number }[]>();
-  for (const t of model.tiles) {
+  for (const t of overlayArt ? [] : model.tiles) {
     if (!t.resource) continue;
     const kind = t.resourceType ?? "Bonus";
     const arr = resGroups.get(kind) ?? [];
@@ -566,5 +611,13 @@ export async function buildScene(
     model.bounds.maxX - model.bounds.minX,
     model.bounds.maxY - model.bounds.minY,
   ) / 2;
-  return { scene, center, radius, civ5Terrain: useCiv5 };
+  return {
+    scene,
+    center,
+    radius,
+    civ5Terrain: useCiv5,
+    update: (camera, viewportHeightPx) => {
+      bubbleLayer?.update(camera, viewportHeightPx);
+    },
+  };
 }

@@ -339,6 +339,53 @@ DECALS_IMPROVEMENTS = {
 }
 
 
+def synthesize_stone_bubble() -> None:
+    """Civ5 shipped no strategic-view icon for Stone (it predates SV art).
+
+    Synthesize one in the same visual language: reuse the dark glass disc from
+    sv_iron (its ring/gloss), paint boulders over the anvil. Saved next to the
+    extracted originals so the renderer treats it identically.
+    """
+    from PIL import ImageDraw, ImageFilter
+
+    base_path = OUT / "sv" / "sv_iron.png"
+    if not base_path.exists():
+        print("  sv_iron.png missing — run sv extraction first")
+        return
+    im = Image.open(base_path).convert("RGBA")
+    w, h = im.size
+    cx, cy = w // 2, h // 2
+    # cover the anvil with the disc's own dark navy (sampled from an empty ring
+    # area), feathered so the gloss survives
+    patch = Image.new("RGBA", im.size, (0, 0, 0, 0))
+    pd = ImageDraw.Draw(patch)
+    fill = im.getpixel((cx, int(h * 0.78)))[:3]
+    pd.ellipse([cx - 62, cy - 58, cx + 62, cy + 66], fill=(*fill, 255))
+    patch = patch.filter(ImageFilter.GaussianBlur(6))
+    im.alpha_composite(patch)
+    d = ImageDraw.Draw(im)
+
+    def boulder(bx, by, r, tone):
+        outline = tuple(max(0, c - 60) for c in tone[:3]) + (255,)
+        d.ellipse(
+            [bx - r, by - int(r * 0.82), bx + r, by + int(r * 0.82)],
+            fill=tone,
+            outline=outline,
+            width=4,
+        )
+        # top-light
+        d.ellipse(
+            [bx - int(r * 0.55), by - int(r * 0.62), bx + int(r * 0.3), by - int(r * 0.08)],
+            fill=tuple(min(255, c + 42) for c in tone[:3]) + (255,),
+        )
+
+    boulder(cx - 34, cy + 26, 30, (122, 120, 114, 255))
+    boulder(cx + 34, cy + 30, 27, (104, 102, 96, 255))
+    boulder(cx, cy - 14, 38, (150, 148, 140, 255))
+    im.save(OUT / "sv" / "sv_stone.png")
+    print("  synthesized sv_stone.png")
+
+
 def extract_decals(root: Path) -> None:
     """Extract ground decals into public/textures/civ5/decal/."""
     out = OUT / "decal"
@@ -444,6 +491,9 @@ def main() -> None:
 
     # 5) Ground decals (crop fields, riverbanks, roads, improvement pads)
     extract_decals(root)
+
+    # 6) Synthesized bubbles for resources Civ5 shipped no SV art for
+    synthesize_stone_bubble()
 
     print(f"done → {OUT}")
 

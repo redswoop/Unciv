@@ -77,7 +77,19 @@ export interface Civ5TileSpec {
   height?: number;
   /** board-model corner heights — when set, terrain uses welded base + piece detail */
   cornerHeights?: [number, number, number, number, number, number];
+  /** keep trees out of the resource-bubble corner (tile carries a resource) */
+  clearBubble?: boolean;
+  /** keep trees out of the tile center (improvement decal/bubble sits there) */
+  clearCenter?: boolean;
+  /**
+   * skip the Firaxis piece heightmap (natural-wonder tiles: their pictorial
+   * art stands on the welded dome; a full mountain peak would bury it)
+   */
+  suppressPiece?: boolean;
 }
+
+/** Where the resource bubble sits inside a tile (mirrored in civ5-overlays). */
+export const BUBBLE_LOCAL: Vec2 = { x: -0.4, y: 0.42 };
 
 /** full = whole map (lighter); detail = chunk; hero = single-tile showcase density */
 export type FoliageQuality = "full" | "detail" | "hero";
@@ -1209,7 +1221,12 @@ export class Civ5TileKit {
     return look.heights[i]!;
   }
 
-  private async resolveHf(look: TerrainLook, key: string): Promise<HeightField | null> {
+  private async resolveHf(
+    look: TerrainLook,
+    key: string,
+    suppressPiece = false,
+  ): Promise<HeightField | null> {
+    if (suppressPiece) return this.heightField([], look.hScale, true);
     const hfFile = this.pickHeightFile(look, key);
     return this.heightField(hfFile ? [hfFile] : [], look.hScale, look.flat || !hfFile);
   }
@@ -1249,7 +1266,7 @@ export class Civ5TileKit {
       for (let si = 0; si < specs.length; si++) {
         const s = specs[si]!;
         if (!hfByKey.has(s.key)) {
-          hfByKey.set(s.key, await this.resolveHf(looks[si]!, s.key));
+          hfByKey.set(s.key, await this.resolveHf(looks[si]!, s.key, s.suppressPiece));
         }
       }
       // mountains: double tessellation — the peak spike in the 128px piece
@@ -1779,7 +1796,7 @@ ${
     const hfFile = this.pickHeightFile(look, s.key);
     const cacheKey = `${hfFile ?? ""}|${look.hScale}`;
     const hf =
-      look.flat || !hfFile
+      look.flat || !hfFile || s.suppressPiece
         ? ({ data: new Uint8ClampedArray(4), w: 1, h: 1, hScale: look.hScale, flat: true } as HeightField)
         : (this.heightCache.get(cacheKey) ?? null);
     return terrainHeightAt(s, look, hf, this.corners, lx, ly);
@@ -1964,6 +1981,15 @@ ${
           // jungle: slightly softer mask threshold so the blob fills
           if (m < (wider ? 0.16 : 0.22)) continue;
         }
+
+        // clearings: resource bubbles / improvement pads must stay readable
+        // inside woods (Civ5 clears a patch around camps and lumber mills)
+        if (tile.clearBubble) {
+          const dx = lx - BUBBLE_LOCAL.x;
+          const dy = ly - BUBBLE_LOCAL.y;
+          if (dx * dx + dy * dy < 0.42 * 0.42) continue;
+        }
+        if (tile.clearCenter && lx * lx + ly * ly < 0.36 * 0.36) continue;
 
         const scale =
           scaleRange[0] + hash01(tile.key, 9000 + n) * (scaleRange[1] - scaleRange[0]);
