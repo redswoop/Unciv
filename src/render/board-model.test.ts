@@ -275,3 +275,25 @@ describe("city era + wonders (real saves)", () => {
     }
   });
 });
+
+describe("city layout (pure)", () => {
+  test("era styles map correctly and scale with population", async () => {
+    const { eraStyleOf, layoutCity } = await import("./city-mesh");
+    expect(eraStyleOf("Ancient era", 0)).toBe("ancient");
+    expect(eraStyleOf("Information era", 1)).toBe("modern");
+    expect(eraStyleOf(undefined, 0.5)).toBe("renaissance");
+    const small = layoutCity("c1", 1, "ancient", 0);
+    const big = layoutCity("c1", 20, "ancient", 0);
+    expect(big.buildings.length).toBeGreaterThan(small.buildings.length);
+    // walls only through medieval
+    expect(layoutCity("c1", 5, "medieval", 0).wallRadius).toBeGreaterThan(0);
+    expect(layoutCity("c1", 5, "modern", 0).wallRadius).toBe(0);
+    // wonders add flagged buildings
+    const withWonders = layoutCity("c1", 5, "classical", 2);
+    expect(withWonders.buildings.filter((b) => b.wonder).length).toBe(2);
+    // deterministic
+    expect(JSON.stringify(layoutCity("x", 8, "medieval", 1))).toBe(
+      JSON.stringify(layoutCity("x", 8, "medieval", 1)),
+    );
+  });
+});

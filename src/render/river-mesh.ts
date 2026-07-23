@@ -95,6 +95,79 @@ function stripGeometry(rowsList: StripVertex[][][]): THREE.BufferGeometry {
 /** Base river half-width in world units (hex circumradius = 1). */
 const RIVER_HALF_WIDTH = 0.075;
 
+/**
+ * Roads / railroads as smoothed draped ribbons (same strip machinery as
+ * rivers — road segments chain tile-center to tile-center). Roads read as
+ * rutted dirt; railroads as dark gravel with tie dashes along the length.
+ */
+export function buildRoadLayer(
+  segments: EdgeSegment[],
+  kind: "Road" | "Railroad",
+  zAt: WorldZ,
+): THREE.Group {
+  const group = new THREE.Group();
+  if (segments.length === 0) return group;
+  const paths = chainRiverPaths(segments);
+  const rows: StripVertex[][][] = [];
+  const half = kind === "Railroad" ? 0.055 : 0.06;
+  for (const path of paths) {
+    const pts = smoothRiverPath(path, 4);
+    rows.push(stripVertices(pts, () => half, zAt, 0.016, 1));
+  }
+  const geo = stripGeometry(rows);
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {},
+    vertexShader: `
+      varying vec2 vUv;
+      void main() {
+        vUv = uv;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }
+    `,
+    fragmentShader:
+      kind === "Railroad"
+        ? `
+      varying vec2 vUv;
+      void main() {
+        float edge = 1.0 - abs(vUv.y - 0.5) * 2.0;
+        float a = smoothstep(0.0, 0.4, edge) * 0.92;
+        // gravel bed
+        vec3 c = vec3(0.32, 0.30, 0.27);
+        // ties: dashes across the width
+        float tie = step(0.62, fract(vUv.x * 9.0)) * step(0.18, edge);
+        c = mix(c, vec3(0.23, 0.17, 0.11), tie * 0.9);
+        // twin rails: two bright lines along the length
+        float railBand = smoothstep(0.04, 0.0, abs(abs(vUv.y - 0.5) - 0.2));
+        c = mix(c, vec3(0.62, 0.63, 0.66), railBand * 0.85);
+        gl_FragColor = vec4(c, a);
+      }
+    `
+        : `
+      varying vec2 vUv;
+      void main() {
+        float edge = 1.0 - abs(vUv.y - 0.5) * 2.0;
+        float a = smoothstep(0.0, 0.5, edge) * 0.82;
+        // packed dirt, wheel ruts darker
+        vec3 c = vec3(0.52, 0.42, 0.30);
+        float rut = smoothstep(0.05, 0.0, abs(abs(vUv.y - 0.5) - 0.16));
+        c = mix(c, vec3(0.38, 0.30, 0.21), rut * 0.7);
+        // subtle length variation so long roads aren't a flat band
+        c *= 0.94 + 0.10 * fract(sin(floor(vUv.x * 3.0) * 12.99) * 43758.55);
+        gl_FragColor = vec4(c, a);
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.renderOrder = 1.4;
+  group.add(mesh);
+  return group;
+}
+
 export function buildRiverLayer(
   rivers: EdgeSegment[],
   zAt: WorldZ,

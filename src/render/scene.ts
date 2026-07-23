@@ -38,7 +38,8 @@ import {
   type OverlayTile,
 } from "./civ5-overlays";
 import { buildResourceTerrainArt } from "./resource-terrain";
-import { buildRiverLayer } from "./river-mesh";
+import { buildRiverLayer, buildRoadLayer } from "./river-mesh";
+import { buildCityMeshes, eraStyleOf, type CitySite } from "./city-mesh";
 import assetMap from "./asset-map.json";
 
 /**
@@ -452,16 +453,21 @@ export async function buildScene(
     }
   }
 
+  // world-space terrain height sampler (civ5 mode): any (x,y) → rendered z
+  let worldZ: ((x: number, y: number) => number) | null = null;
+  if (useCiv5 && overlayGroundZ) {
+    const overlayByKey = new Map(overlayTiles.map((t) => [t.key, t]));
+    worldZ = (x: number, y: number): number => {
+      const hex = roundHexCoords(world2HexCoords({ x, y }));
+      const ot = overlayByKey.get(`${hex.x},${hex.y}`);
+      return ot ? overlayGroundZ!(ot, x - ot.world.x, y - ot.world.y) : 0;
+    };
+  }
+
   // ——— rivers ———
   if (model.rivers.length > 0) {
-    if (useCiv5 && overlayGroundZ) {
+    if (worldZ) {
       // smoothed, animated ribbons draped on the rendered terrain
-      const overlayByKey = new Map(overlayTiles.map((t) => [t.key, t]));
-      const worldZ = (x: number, y: number): number => {
-        const hex = roundHexCoords(world2HexCoords({ x, y }));
-        const ot = overlayByKey.get(`${hex.x},${hex.y}`);
-        return ot ? overlayGroundZ!(ot, x - ot.world.x, y - ot.world.y) : 0;
-      };
       const bumps = await new Promise<THREE.Texture | null>((resolve) => {
         new THREE.TextureLoader().load(
           resolveTexture("").startsWith("data:") ? "" : "textures/civ5/waterbumps.png",
@@ -489,6 +495,18 @@ export async function buildScene(
   for (const kind of ["Road", "Railroad"] as const) {
     const segs = model.roads.filter((r) => r.kind === kind);
     if (segs.length === 0) continue;
+    if (worldZ) {
+      // smoothed draped ribbons: rutted dirt / gravel + ties (same strip
+      // machinery as rivers — road segments chain center-to-center)
+      scene.add(
+        buildRoadLayer(
+          segs.map((r) => ({ a: r.from, b: r.to, za: r.zFrom, zb: r.zTo })),
+          kind,
+          worldZ,
+        ),
+      );
+      continue;
+    }
     const spec = assetMap.roads[kind];
     const geo = segmentQuadGeometry(
       segs.map((r) => ({ a: r.from, b: r.to, za: r.zFrom, zb: r.zTo })),
@@ -627,15 +645,32 @@ export async function buildScene(
     scene.add(sprite);
   }
 
-  // ——— cities (drawn last, on top) ———
+  // ——— cities: 3D era-styled building clusters (civ5 mode) ———
+  if (useCiv5 && overlayGroundZ) {
+    const overlayByKey = new Map(overlayTiles.map((t) => [t.key, t]));
+    const sites: CitySite[] = model.cities.map((c) => {
+      const ot = overlayByKey.get(c.key);
+      return {
+        marker: c,
+        style: eraStyleOf(c.era, c.eraT),
+        groundZ: (lx: number, ly: number) =>
+          ot ? overlayGroundZ!(ot, lx, ly) : Math.max(c.z, 0.02),
+      };
+    });
+    scene.add(buildCityMeshes(sites));
+  }
+
+  // ——— city banners (screen-size capped in the render loop) ———
+  const cityBanners: THREE.Sprite[] = [];
   for (const c of model.cities) {
     const colors = model.civColors.get(c.civ)!;
     const tex = cityBannerTexture(c.name, c.population, colors);
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
     sprite.renderOrder = 12;
-    sprite.position.set(c.world.x, c.world.y + 0.55, c.z + 0.6);
+    sprite.position.set(c.world.x, c.world.y + 0.35, c.z + 0.5);
     sprite.scale.set(4.6, 1.44, 1);
     scene.add(sprite);
+    cityBanners.push(sprite);
   }
 
   const center = {
@@ -655,6 +690,14 @@ export async function buildScene(
       bubbleLayer?.update(camera, viewportHeightPx);
       const t = (performance.now() % 3600000) / 1000;
       for (const u of timeUniforms) u.value = t;
+      // banners: constant screen height (~24px), clamped in world units so
+      // they neither dwarf tiles up close nor unreadably shrink at map zoom
+      const perZ = (2 * Math.tan((camera.fov * Math.PI) / 360)) / viewportHeightPx;
+      for (const s of cityBanners) {
+        const dist = camera.position.distanceTo(s.position);
+        const hWorld = Math.min(1.05, Math.max(0.2, 32 * perZ * dist));
+        s.scale.set(hWorld * 3.2, hWorld, 1);
+      }
     },
   };
 }
