@@ -36,6 +36,10 @@ save file (base64+gzip, libGDX JSON)
                                             heights, welded corner heights, owners,
                                             borders, rivers, roads, cities, units
   → src/render/scene.ts                     three.js: merged geometries, lights, sprites
+      + civ5-overlays.ts (icon bubbles, decals, wonder art)
+      + resource-terrain.ts (on-tile herds/outcrops/crops/sea life)
+      + river-paths.ts (pure chaining) / river-mesh.ts (ribbons, roads)
+      + city-mesh.ts (era-styled procedural cities)
   → src/app-boot.ts                         shared boot; entries: main.ts (fetch)
                                             and embedded-main.ts (all inlined)
 ```
@@ -76,7 +80,13 @@ save file (base64+gzip, libGDX JSON)
 Camera FOV 16°, tilt 0.9. Full map uses **Firaxis digimaps + piece heightmaps**
 when `public/textures/civ5/` exists (`python3 cli/extract-civ5-assets.py` from
 local Steam Civ5); otherwise Artful fallback. Kit: `src/render/civ5-tiles.ts`.
-Chunk/hero demos: `/chunk.html`, `/hero.html`.
+The extractor also pulls `sv/` (strategic-view sprites: resource/improvement
+bubbles, natural-wonder art, city sprites — exact FPK-v6 parser, see
+`parse_fpk_exact`) and `decal/` (crop fields, riverbank, roads strips,
+improvement pads). Demo pages: `/chunk.html`, `/hero.html`,
+`/gallery.html?mode=resources|cities|wonders|improvements` (art QA sheets),
+`/art.html` (procedural-sprite dev sheet). `/?save=turn518-14civs` loads the
+late-game fixture in the main app.
 
 Done: core land looks locked (grass/plains/desert/tundra/snow, flat + hill)
 with per-terrain `TerrainLook.gain` calibrated vs the real frame capture
@@ -85,18 +95,45 @@ if lighting/tone mapping changes), smooth per-vertex baked hillshade, and
 priority-ordered land-land blend skirts (higher `blendPriority` washes over
 lower; all pinned in `civ5-tiles.test.ts`). Remaining gaps:
 
-1. **City banners are world-scaled sprites** — monstrous when zoomed in,
-   overlapping when zoomed out. Fix: screen-space size cap (scale sprites by
-   distance in the render loop), fade/cluster at far zoom. `scene.ts` cities section.
+Done (2026-07-23 overnight): **resources, rivers, roads, cities, wonders**.
+- Resources render TWICE, like Civ5: an icon layer (real `sv_*` bubbles as
+  merged constant-screen-size billboards — `civ5-overlays.ts`; icons are UI,
+  never terrain paint) AND on-terrain art (`resource-terrain.ts`): animal
+  herd billboards w/ grazing-drift shader anim, upright mineral outcrops
+  (shiny veins/crystals growing out of boulders), crop/orchard patches (real
+  wheat_farm/crops decals), circling fish schools, surfacing whales. Category
+  tables + placement are pure/testable; forest tiles get clearings
+  (`clearBubble`/`clearCenter`) so art stays readable under trees.
+- Rivers: per-edge segments chain into polylines (`river-paths.ts`, pure,
+  Y-junctions take the straightest continuation) → centripetal Catmull-Rom →
+  draped bank + animated water ribbons (`river-mesh.ts`, flow/sparkle/foam).
+- Roads/railroads reuse the same strip machinery: rutted-dirt ribbon, rail
+  gravel with tie dashes + twin rails.
+- Cities are era-styled procedural 3D clusters (`city-mesh.ts`): era from
+  `civ.tech.techsResearched` × vendored Techs.json (`civEra`), pop scales
+  building count, ancient→medieval get wall rings, industrial smokestacks,
+  modern glass towers, world wonders (Buildings.json `isWonder` ∩
+  `builtBuildings`) add white-gold landmarks. Banners are screen-size capped
+  in the render loop.
+- Natural wonders use their real Firaxis art (billboards for mountain-types,
+  surface decals for reef/crater) — `suppressPiece` flattens the mountain
+  peak so art owns the tile. Sea wonders anchor at the waterline, not seabed.
+- ShaderMaterial gotcha (cost us three dark-art bugs): custom shaders skip
+  three's tonemapping/encoding chunks, so their textures must load with
+  `colorSpace = NoColorSpace` (raw passthrough) or they double-darken.
+- sirv/vite gotcha: fetch ruleset paths with `encodeURI` — `%26` for & falls
+  through to the SPA HTML fallback and parseGdxJson explodes.
+
+Remaining gaps:
+
 2. **Foliage polish** — forests follow extracted `docs/civ5-forests.xml`
    (360 trees/tile, 4 masks, space_between, overlay α0.6), LOD-scaled
    (hero/detail/full). Still billboard atlas not 3D GR2; atlas res + true
    360 density on full map are remaining knobs.
-3. **Railroads/roads are chunky flat quads** — the dark crisscross reads as
-   scribbles. Thinner width, dashed ties for rail, and route through edge
-   midpoints (curve via city/tile centers) would read far better.
-4. **Unit markers are letter-initial billboards.** Even Civ5-style flag pins
-   (pole + banner icon shape) would read better; unit-type icon atlas later.
+4. **Unit markers are letter-initial billboards.** Extracted `sv_<unit>.dds`
+   silhouettes exist for ~150 unit types (see StrategicViewTextures.fpk TOC)
+   — a flag-pin + silhouette icon layer is mostly wiring. Unused extracted
+   city sprites (`sv_ancient_africa_*_city`) could seed a far-zoom city LOD.
 5. **Water (mostly done)** — Civ5-style system: water tiles carry negative
    seabed depths (`SEABED_DEPTH`), the waterline is the z=0 contour of the
    welded field. Geometry rules earned by iteration (each guards against a
@@ -115,12 +152,15 @@ lower; all pinned in `civ5-tiles.test.ts`). Remaining gaps:
    traps: load the LUT **non-sRGB** (hardware decode + ACES crushes its navy
    to black), NO normal map on the surface (minification → binary speckle;
    bumps only feed foam noise), beach/floor shader passes only on welded
-   boards (standalone chunk tiles sit at FLAT_Z ≈ the sand band). Remaining:
-   close-zoom shimmer, Ice feature look, mountain-foot rock/beach blend.
-6. **No fog of war** — everything is visible. Save carries per-civ
+   boards (standalone chunk tiles sit at FLAT_Z ≈ the sand band). The surface
+   now also animates: slow swell bands + drifting sun-glint + sparse deep-sea
+   whitecaps (all LOW-frequency bump samples — high-freq aliases to speckle).
+   Remaining: Ice feature look, mountain-foot rock/beach blend, standalone
+   (non-welded) water tiles in galleries read as flat plates.
+5. **No fog of war** — everything is visible. Save carries per-civ
    `exploredTiles`; a "view as civ X" toggle + darkened unexplored tiles is
    pure board-model work.
-7. Per-tile UV rotation (6 variants) to further break large-field tiling.
+6. Per-tile UV rotation (6 variants) to further break large-field tiling.
 
 ## Distribution
 
