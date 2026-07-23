@@ -74,6 +74,8 @@ export interface RoadSegment {
 
 export interface CityMarker {
   world: Vec2;
+  /** posKey of the tile the city sits on */
+  key: string;
   name: string;
   civ: string;
   population: number;
@@ -82,6 +84,8 @@ export interface CityMarker {
 
 export interface UnitMarker {
   world: Vec2;
+  /** posKey of the tile the unit stands on */
+  key: string;
   name: string;
   civ: string;
   military: boolean;
@@ -297,6 +301,7 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       if (!civColors.has(owner)) civColors.set(owner, fallbackColor(owner));
       units.push({
         world,
+        key,
         name: unit.name,
         civ: owner,
         military: isMilitaryUnit(ruleset, unit.name),
@@ -371,6 +376,7 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
   for (const { city, civName } of pendingCities) {
     cities.push({
       world: hex2WorldCoords({ x: posX(city.location), y: posY(city.location) }),
+      key: posKey(city.location),
       name: city.name ?? "?",
       civ: civName,
       population: city.population?.population ?? 1,

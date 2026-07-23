@@ -13,7 +13,10 @@ import { buildBoardModel } from "./render/board-model";
 import { buildScene } from "./render/scene";
 import { DIST_SCALE, MapCameraControls } from "./render/camera-controls";
 import { hexCornerVectors } from "./hex/hex-math";
+import { attachHoverInspector } from "./render/hover-inspector";
+import { TilePicker } from "./render/tile-picker";
 import { mountSiteNav } from "./ui/site-nav";
+import { TileInfoIndex, tileInfoHtml } from "./ui/tile-inspector";
 
 export interface AppOptions {
   /** Raw text of the save to load on boot (wire format, not parsed). */
@@ -32,6 +35,8 @@ export async function bootApp(opts: AppOptions): Promise<void> {
   let renderer: THREE.WebGLRenderer | null = null;
   let controls: MapCameraControls | null = null;
   let currentScene: THREE.Scene | null = null;
+  let picker: TilePicker | null = null;
+  let infoIndex: TileInfoIndex | null = null;
 
   async function show(game: GameInfo): Promise<void> {
     status.textContent = "Resolving ruleset…";
@@ -53,6 +58,14 @@ export async function bootApp(opts: AppOptions): Promise<void> {
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.12;
       app.appendChild(renderer.domElement);
+
+      // hover tile inspector: cast the cursor ray, pick against terrain relief
+      attachHoverInspector({
+        dom: renderer.domElement,
+        camera: () => controls?.camera ?? null,
+        picker: () => picker,
+        html: (tile) => (infoIndex ? tileInfoHtml(infoIndex.info(tile)) : null),
+      });
     }
     // dispose previous GPU resources when reloading a save
     if (currentScene) {
@@ -71,6 +84,8 @@ export async function bootApp(opts: AppOptions): Promise<void> {
       });
     }
     currentScene = scene;
+    picker = new TilePicker(model, hexCornerVectors());
+    infoIndex = new TileInfoIndex(model);
     controls = new MapCameraControls(
       renderer.domElement,
       window.innerWidth / window.innerHeight,

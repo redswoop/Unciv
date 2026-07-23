@@ -1182,7 +1182,8 @@ export class Civ5TileKit {
     }
   }
 
-  private groundZ(s: Civ5TileSpec, lx: number, ly: number): number {
+  /** Rendered surface height at a local offset — foliage placement AND hover picking. */
+  groundZ(s: Civ5TileSpec, lx: number, ly: number): number {
     const look = lookFor(s.baseTerrain, s.features);
     const hfFile = this.pickHeightFile(look, s.key);
     const cacheKey = `${hfFile ?? ""}|${look.hScale}`;

@@ -13,7 +13,10 @@ import {
   NEIGHBOR_CLOCK_POSITIONS,
 } from "./hex/hex-math";
 import { Civ5TileKit, type Civ5TileSpec } from "./render/civ5-tiles";
+import { attachHoverInspector } from "./render/hover-inspector";
+import { HexRayPicker } from "./render/tile-picker";
 import { mountSiteNav } from "./ui/site-nav";
+import { specInfoHtml } from "./ui/tile-inspector";
 
 async function main(): Promise<void> {
   const app = document.getElementById("app")!;
@@ -126,6 +129,15 @@ async function main(): Promise<void> {
       renderer.setSize(innerWidth, innerHeight);
       camera.aspect = innerWidth / innerHeight;
       camera.updateProjectionMatrix();
+    });
+
+    // hover tile inspector, picked against the kit's rendered surface heights
+    const picker = new HexRayPicker(tiles, (t, local) => kit.groundZ(t, local.x, local.y));
+    attachHoverInspector({
+      dom: renderer.domElement,
+      camera: () => camera,
+      picker: () => picker,
+      html: specInfoHtml,
     });
 
     status.textContent = "";
