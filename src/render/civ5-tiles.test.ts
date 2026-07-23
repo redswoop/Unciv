@@ -55,6 +55,14 @@ describe("civ5 tile kit: the four core land looks are pinned", () => {
     }
   });
 
+  test("only Mountain samples triplanar (steep faces need side projection)", () => {
+    expect(lookFor("Mountain", []).triplanar).toBe(true);
+    for (const base of ["Grassland", "Plains", "Desert", "Tundra", "Snow", "Coast"]) {
+      expect(lookFor(base, []).triplanar).toBeUndefined();
+      expect(lookFor(base, ["Hill"]).triplanar).toBeUndefined();
+    }
+  });
+
   test("non-Hill features never change the base look", () => {
     const plain = lookFor("Grassland", []);
     for (const f of [["Forest"], ["Jungle"], ["Marsh"], ["Fallout"], ["Oasis"]]) {

@@ -104,6 +104,17 @@ export interface TerrainLook {
    * the reverse) — how Civ5's continuous ground paint reads at hex borders.
    */
   blendPriority?: number;
+  /**
+   * Sample the digimap triplanar (projected from x/y/z by surface normal)
+   * instead of flat world-plane UV. Planar UV smears into long vertical
+   * streaks on steep faces — mountains need side projection.
+   */
+  triplanar?: boolean;
+  /**
+   * Altitude-blended cap texture (triplanar only): washes over the digimap
+   * near the top of the relief — Civ5 mountains read as rock with snow caps.
+   */
+  capDigimap?: string;
 }
 
 const LOOKS: Record<string, TerrainLook> = {
@@ -153,6 +164,8 @@ const LOOKS: Record<string, TerrainLook> = {
     hScale: 0.88,
     flat: false,
     blendPriority: 8,
+    triplanar: true,
+    capDigimap: "euro_mountain_top_d.png",
   },
   Coast: {
     digimap: "euro_coast_d.png",
@@ -356,8 +369,9 @@ export function sampleHeight(
   if (!hf || hf.flat) return FLAT_Z + microRelief(wx, wy);
   const [u, v] = localToUV(lx, ly);
   const raw = sampleR8(hf.data, hf.w, hf.h, u, v);
-  // constant-196 flat sentinels (flat piece maps)
-  if (raw > 180) return FLAT_Z + microRelief(wx, wy);
+  // NO per-texel flat-sentinel check here: constant-196 flat pieces are
+  // detected at load (heightField → flat:true). Mountain peaks legitimately
+  // reach 245 — truncating >180 carved craters into every summit.
   let z = (Math.max(0, raw - H_BASE) / (255 - H_BASE)) * hf.hScale;
   const r = Math.hypot(lx, ly);
   // start falloff earlier so hills blend into neighbours instead of mesa edges
@@ -767,6 +781,64 @@ function slopeShade(dzdx: number, dzdy: number): number {
   return Math.min(1.3, Math.max(0.6, shade));
 }
 
+/** Side-projection repeat scale for triplanar sampling (repeats per world unit). */
+const TRIPLANAR_SIDE_UV = 0.45;
+
+/**
+ * Swap the material's planar map lookup for object-space triplanar sampling
+ * (meshes carry no transform, so object space is world space; z is up).
+ * Steep faces sample the texture projected from the side, so mountain walls
+ * get crisp rock instead of the vertical smear planar world UV produces.
+ * The top (z) projection keeps DIGIMAP_UV so near-flat ground looks unchanged;
+ * the side projections repeat tighter for crispness on tall faces.
+ */
+function applyTriplanar(mat: THREE.MeshLambertMaterial, cap: THREE.Texture | null): void {
+  mat.customProgramCacheKey = () => `civ5-triplanar|${cap ? "cap" : "nocap"}`;
+  mat.onBeforeCompile = (shader) => {
+    if (cap) shader.uniforms.capMap = { value: cap };
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        "void main() {",
+        `varying vec3 vTriPos;\nvarying vec3 vTriNormal;\n${cap ? "attribute float aRelief;\nvarying float vRelief;\n" : ""}void main() {`,
+      )
+      .replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>\nvTriPos = position;\nvTriNormal = normal;${cap ? "\nvRelief = aRelief;" : ""}`,
+      );
+    // Snow cap: fade in by altitude, snowline broken up by the rock texture
+    // itself; near-vertical crags shed snow (normal-z gate) like the real
+    // game's dark rock faces under white ridges.
+    const capGlsl = cap
+      ? `
+  vec4 capX = texture2D(capMap, vTriPos.yz * ${TRIPLANAR_SIDE_UV});
+  vec4 capY = texture2D(capMap, vTriPos.xz * ${TRIPLANAR_SIDE_UV});
+  vec4 capZ = texture2D(capMap, vTriPos.xy * ${DIGIMAP_UV});
+  vec4 capC = capX * triW.x + capY * triW.y + capZ * triW.z;
+  float snow = smoothstep(0.24, 0.48, vRelief + (triC.r - 0.5) * 0.22);
+  snow *= smoothstep(0.12, 0.45, normalize(vTriNormal).z);
+  triC = mix(triC, capC, snow);`
+      : "";
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "void main() {",
+        `varying vec3 vTriPos;\nvarying vec3 vTriNormal;\n${cap ? "uniform sampler2D capMap;\nvarying float vRelief;\n" : ""}void main() {`,
+      )
+      .replace(
+        "#include <map_fragment>",
+        `#ifdef USE_MAP
+  vec3 triW = abs(normalize(vTriNormal));
+  triW = pow(triW, vec3(4.0));
+  triW /= triW.x + triW.y + triW.z;
+  vec4 triX = texture2D(map, vTriPos.yz * ${TRIPLANAR_SIDE_UV});
+  vec4 triY = texture2D(map, vTriPos.xz * ${TRIPLANAR_SIDE_UV});
+  vec4 triZ = texture2D(map, vTriPos.xy * ${DIGIMAP_UV});
+  vec4 triC = triX * triW.x + triY * triW.y + triZ * triW.z;${capGlsl}
+  diffuseColor *= triC;
+#endif`,
+      );
+  };
+}
+
 export class Civ5TileKit {
   private digimapCache = new Map<string, THREE.Texture>();
   private heightCache = new Map<string, HeightField | null>();
@@ -935,13 +1007,23 @@ export class Civ5TileKit {
           hfByKey.set(s.key, await this.resolveHf(looks[si]!, s.key));
         }
       }
-      const tPer = 6 * divs * divs;
+      // mountains: double tessellation — the peak spike in the 128px piece
+      // heightmap aliases into zigzag "teeth" at base tessellation
+      const d = matLook.triplanar ? divs * 2 : divs;
+      const tPer = 6 * d * d;
       const positions = new Float32Array(specs.length * tPer * 9);
       const uvs = new Float32Array(specs.length * tPer * 6);
       const colors = new Float32Array(specs.length * tPer * 9);
+      const normals = new Float32Array(specs.length * tPer * 9);
+      // relief above the tile's own base — snow-cap altitude must not read
+      // absolute z (the welded board base lifts whole mountain tiles, which
+      // painted them solid white on the full map)
+      const reliefs = matLook.triplanar ? new Float32Array(specs.length * tPer * 3) : null;
       let p = 0;
       let u = 0;
       let cw = 0;
+      let nw = 0;
+      let rw = 0;
 
       for (let si = 0; si < specs.length; si++) {
         const s = specs[si]!;
@@ -953,31 +1035,48 @@ export class Civ5TileKit {
         for (let sec = 0; sec < 6; sec++) {
           const a = this.corners[sec]!;
           const b = this.corners[(sec + 1) % 6]!;
-          const point = (i: number, j: number): [number, number, number, number] => {
-            const lx = ((i * a.x + j * b.x) / divs) * OVERLAP;
-            const ly = ((i * a.y + j * b.y) / divs) * OVERLAP;
+          const point = (
+            i: number,
+            j: number,
+          ): [number, number, number, number, number, number, number, number] => {
+            const lx = ((i * a.x + j * b.x) / d) * OVERLAP;
+            const ly = ((i * a.y + j * b.y) / d) * OVERLAP;
             const hAt = (x: number, y: number) =>
               terrainHeightAt(s, look, hf, this.corners, x, y);
             const z = hAt(lx / OVERLAP, ly / OVERLAP);
+            // piece relief above this tile's base (hf=null → base surface)
+            const relief = reliefs
+              ? z - terrainHeightAt(s, look, null, this.corners, lx / OVERLAP, ly / OVERLAP)
+              : 0;
             let shade = 1;
+            let nx = 0;
+            let ny = 0;
+            let nz = 1;
             if (!look.water) {
-              // smooth hillshade from the height gradient (see slopeShade)
+              // smooth hillshade + analytic normal from the height gradient.
+              // The merged mesh is unindexed triangle soup, so
+              // computeVertexNormals() would give per-FACE normals — flat
+              // shaded facets that read as chiseled shards on mountains.
               const e = 0.06;
               const dzdx = (hAt(lx / OVERLAP + e, ly / OVERLAP) - z) / e;
               const dzdy = (hAt(lx / OVERLAP, ly / OVERLAP + e) - z) / e;
               shade = slopeShade(dzdx, dzdy);
+              const inv = 1 / Math.hypot(dzdx, dzdy, 1);
+              nx = -dzdx * inv;
+              ny = -dzdy * inv;
+              nz = inv;
             }
-            return [cx + lx, cy + ly, z, shade];
+            return [cx + lx, cy + ly, z, shade, nx, ny, nz, relief];
           };
-          for (let i = 0; i < divs; i++) {
-            for (let j = 0; j < divs - i; j++) {
+          for (let i = 0; i < d; i++) {
+            for (let j = 0; j < d - i; j++) {
               const emit = (i0: number, j0: number, i1: number, j1: number, i2: number, j2: number) => {
                 for (const [ii, jj] of [
                   [i0, j0],
                   [i1, j1],
                   [i2, j2],
                 ] as const) {
-                  const [x, y, z, shade] = point(ii, jj);
+                  const [x, y, z, shade, nx, ny, nz, relief] = point(ii, jj);
                   positions[p++] = x;
                   positions[p++] = y;
                   positions[p++] = z;
@@ -986,10 +1085,14 @@ export class Civ5TileKit {
                   colors[cw++] = shade;
                   colors[cw++] = shade;
                   colors[cw++] = shade;
+                  normals[nw++] = nx;
+                  normals[nw++] = ny;
+                  normals[nw++] = nz;
+                  if (reliefs) reliefs[rw++] = relief;
                 }
               };
               emit(i, j, i, j + 1, i + 1, j);
-              if (j < divs - i - 1) emit(i + 1, j, i, j + 1, i + 1, j + 1);
+              if (j < d - i - 1) emit(i + 1, j, i, j + 1, i + 1, j + 1);
             }
           }
         }
@@ -999,7 +1102,8 @@ export class Civ5TileKit {
       geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
       geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
       geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-      geo.computeVertexNormals();
+      geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+      if (reliefs) geo.setAttribute("aRelief", new THREE.BufferAttribute(reliefs, 1));
 
       const map = await this.digimap(matLook.digimap);
       const mat = matLook.water
@@ -1018,6 +1122,10 @@ export class Civ5TileKit {
             // baked hillshade lives in vertex colors
             vertexColors: true,
           });
+      if (matLook.triplanar && !matLook.water) {
+        const cap = matLook.capDigimap ? await this.digimap(matLook.capDigimap) : null;
+        applyTriplanar(mat as THREE.MeshLambertMaterial, cap);
+      }
 
       group.add(new THREE.Mesh(geo, mat));
     }
