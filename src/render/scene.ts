@@ -499,6 +499,10 @@ export async function buildScene(
       128,
     );
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+    // above all world transparents (water 0, skirts 0.5, litter 1, trees 2):
+    // depthTest:false alone doesn't help — a LATER transparent draw (water
+    // sorted nearer, tree sprites) still paints over the marker
+    sprite.renderOrder = 10;
     sprite.position.set(t.world.x, t.world.y, t.height + 0.4);
     sprite.scale.set(0.9, 0.9, 1);
     scene.add(sprite);
@@ -537,6 +541,7 @@ export async function buildScene(
     const sprite = new THREE.Sprite(
       new THREE.SpriteMaterial({ map: tex, depthTest: false }),
     );
+    sprite.renderOrder = 11;
     sprite.position.set(u.world.x + (u.military ? -0.25 : 0.3), u.world.y - 0.15, u.z + 0.5);
     sprite.scale.set(0.85, 0.85, 1);
     scene.add(sprite);
@@ -547,6 +552,7 @@ export async function buildScene(
     const colors = model.civColors.get(c.civ)!;
     const tex = cityBannerTexture(c.name, c.population, colors);
     const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+    sprite.renderOrder = 12;
     sprite.position.set(c.world.x, c.world.y + 0.55, c.z + 0.6);
     sprite.scale.set(4.6, 1.44, 1);
     scene.add(sprite);

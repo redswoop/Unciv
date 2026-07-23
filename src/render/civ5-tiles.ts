@@ -1090,8 +1090,12 @@ export class Civ5TileKit {
         }
       }
       // mountains: double tessellation — the peak spike in the 128px piece
-      // heightmap aliases into zigzag "teeth" at base tessellation
-      const d = matLook.triplanar ? divs * 2 : divs;
+      // heightmap aliases into zigzag "teeth" at base tessellation. Floor at
+      // chunk quality (TILE_DIVS*2): at full-map divs (8→16) the peaks melt,
+      // and mountains are rare enough that full tessellation stays cheap.
+      // Safe vs blend skirts: they only drape over LOWER-priority neighbours,
+      // and mountains are top priority, so nothing samples this mesh at `divs`.
+      const d = matLook.triplanar ? Math.max(divs, TILE_DIVS) * 2 : divs;
       const tPer = 6 * d * d;
       const positions = new Float32Array(specs.length * tPer * 9);
       const uvs = new Float32Array(specs.length * tPer * 6);
