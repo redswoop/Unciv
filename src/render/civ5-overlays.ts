@@ -46,7 +46,7 @@ const CIV5 = assetMap.civ5 as unknown as Civ5Assets;
 /** Position of the resource bubble inside its tile (Civ5 puts icons up-left). */
 const BUBBLE_OFFSET: Vec2 = BUBBLE_LOCAL;
 /** Icon size in screen pixels (Civ5's map icons are constant screen size). */
-const BUBBLE_PX = 32;
+const BUBBLE_PX = 42;
 /** World-size clamp: constant screen size, but never dwarf a tile close up. */
 const BUBBLE_WORLD_MIN = 0.02;
 const BUBBLE_WORLD_MAX = 0.5;

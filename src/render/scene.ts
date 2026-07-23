@@ -37,6 +37,7 @@ import {
   type GroundZ,
   type OverlayTile,
 } from "./civ5-overlays";
+import { buildResourceTerrainArt } from "./resource-terrain";
 import assetMap from "./asset-map.json";
 
 /**
@@ -506,18 +507,25 @@ export async function buildScene(
     scene.add(new THREE.Mesh(geo, flatMaterial({ color: rgb(colors.outer) })));
   }
 
-  // ——— on-map Civ5 art: resource icon layer, improvement decals, wonder art ———
+  // ——— on-map Civ5 art: resource icon layer, improvement decals, wonder art,
+  //     and the actual on-terrain resource art (herds, crops, outcrops, fish) ———
   let bubbleLayer: BubbleLayer | null = null;
+  const timeUniforms: { value: number }[] = [];
   if (overlayArt && overlayGroundZ) {
-    const [res, impDecals, wonders] = await Promise.all([
+    const [res, impDecals, wonders, terrainArt] = await Promise.all([
       buildResourceBubbles(overlayTiles, overlayGroundZ),
       buildImprovementDecals(overlayTiles, overlayGroundZ),
       buildNaturalWonderArt(overlayTiles, overlayGroundZ),
+      buildResourceTerrainArt(overlayTiles, overlayGroundZ, {
+        wheatDecalUrl: "textures/civ5/decal/wheat_farm_d.png",
+      }),
     ]);
     scene.add(impDecals);
+    scene.add(terrainArt.group);
     scene.add(res.layer.group);
     scene.add(wonders);
     bubbleLayer = res.layer;
+    timeUniforms.push(...terrainArt.timeUniforms);
   }
 
   // ——— natural wonder markers (fallback when Civ5 art is absent) ———
@@ -618,6 +626,8 @@ export async function buildScene(
     civ5Terrain: useCiv5,
     update: (camera, viewportHeightPx) => {
       bubbleLayer?.update(camera, viewportHeightPx);
+      const t = (performance.now() % 3600000) / 1000;
+      for (const u of timeUniforms) u.value = t;
     },
   };
 }
