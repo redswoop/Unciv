@@ -7,7 +7,7 @@
 import { bootApp } from "./app-boot";
 import { buildRuleset, baseRulesetForSave } from "./ruleset/ruleset";
 
-import saveText from "../public/saves/turn518-14civs.unciv?raw";
+import saveText from "../public/saves/aztecs-turn0.unciv?raw";
 
 import vTerrains from "../public/rulesets/Civ V - Vanilla/Terrains.json?raw";
 import vImprovements from "../public/rulesets/Civ V - Vanilla/TileImprovements.json?raw";

@@ -11,13 +11,13 @@ consume its save output. The POC is done; current work is visual quality.
 
 ```bash
 bun install
-bun run dev          # vite dev server at http://127.0.0.1:5199 (loads bundled real save)
-bun test             # all tests — most assert against the REAL bundled save
-bun run summary      # parse the bundled save, print text summary
+bun run dev          # vite dev server at http://127.0.0.1:5199 (loads the reference save)
+bun test             # all tests — most assert against REAL saves
+bun run summary      # parse the reference save, print text summary
 bunx tsc --noEmit    # typecheck (strict)
 bunx vite build      # normal build -> dist/ (used by Pages workflow)
 bunx vite build --config vite.embedded.config.ts   # single-file build -> dist-embedded/embedded.html
-bun run e2e/screenshot.ts "http://127.0.0.1:5199/?x=-4.5&y=12&dist=16&tilt=0.9" /tmp/shot.png
+bun run e2e/screenshot.ts "http://127.0.0.1:5199/?x=15&y=12&dist=16&tilt=0.9" /tmp/shot.png
 ```
 
 Screenshots: headless chromium at `/opt/pw-browsers/chromium` (playwright-core,
@@ -58,9 +58,14 @@ save file (base64+gzip, libGDX JSON)
   (`public/saves/` — archived multiplayer games, see SAVE_FORMAT.md). Never
   invent schema; when a new save breaks parsing, fix against that save and add
   it as a fixture.
-- **Tests against the real save.** New model/render logic gets a test that runs
-  the actual turn-518 save through it (see `board-model.test.ts` patterns:
-  welded corners, no shearing, edge lengths).
+- **Two fixture saves, two jobs.** `aztecs-turn0.unciv` is the REFERENCE WORLD:
+  bundled default of dev server / embedded build / chunk presets, Armen's own
+  game (1276 tiles, world-wrap, 3 natural wonders; landmarks pinned in
+  `aztec-world.test.ts` — capital @ world (15,12), forest (7.5,1), desert/Sinai
+  (-15,-10.5)). `turn518-14civs.unciv` is the late-game regression fixture
+  (9919 tiles, 266 cities, borders/roads/rivers at scale). New model/render
+  logic gets tests against whichever exercises it — usually both (see
+  `board-model.test.ts` patterns: welded corners, no shearing, edge lengths).
 - Old saves use libGDX *minimal* JSON (unquoted keys AND values) and omit
   default-valued fields (`position:{}` = origin, no `turns` = 0). Ruleset JSONs
   have `//` comments + trailing commas. `parseGdxJson` handles all of it.

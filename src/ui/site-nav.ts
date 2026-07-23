@@ -31,32 +31,32 @@ export const SITE_NAV: SiteNavLink[] = [
     label: "gallery",
     active: (path, search) => isChunk(path) && mode(search) === "gallery",
   },
+  // chunk presets below are landmarks of the aztec-turn0 reference world
   {
-    href: "/chunk.html?mode=chunk&x=-3&y=-44&r=11",
+    href: "/chunk.html?mode=chunk&x=7.5&y=1&r=11",
     label: "forest chunk",
     active: (path, search) => {
       if (!isChunk(path) || mode(search) === "gallery") return false;
       const q = new URLSearchParams(search);
-      return q.get("x") === "-3" && q.get("y") === "-44";
+      return q.get("x") === "7.5" && q.get("y") === "1";
     },
   },
   {
-    href: "/chunk.html?mode=chunk&x=-4.5&y=12&r=12",
-    label: "Korea desert",
+    href: "/chunk.html?mode=chunk&x=-15&y=-10.5&r=12",
+    label: "desert / Sinai",
     active: (path, search) => {
       if (!isChunk(path) || mode(search) === "gallery") return false;
       const q = new URLSearchParams(search);
-      return q.get("x") === "-4.5" && q.get("y") === "12";
+      return q.get("x") === "-15" && q.get("y") === "-10.5";
     },
   },
   {
-    href: "/chunk.html?mode=chunk&x=0&y=0&r=18",
-    label: "origin",
+    href: "/chunk.html?mode=chunk&x=15&y=12&r=12",
+    label: "capital",
     active: (path, search) => {
       if (!isChunk(path) || mode(search) === "gallery") return false;
       const q = new URLSearchParams(search);
-      // default chunk also lands near origin if no params — only mark explicit origin
-      return q.get("x") === "0" && q.get("y") === "0";
+      return q.get("x") === "15" && q.get("y") === "12";
     },
   },
 ];

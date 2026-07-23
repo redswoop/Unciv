@@ -20,7 +20,7 @@ import { HexRayPicker } from "./render/tile-picker";
 import { mountSiteNav } from "./ui/site-nav";
 import { specInfoHtml } from "./ui/tile-inspector";
 
-const SAVE_URL = "saves/turn518-14civs.unciv";
+const SAVE_URL = "saves/aztecs-turn0.unciv";
 
 function status(msg: string): void {
   const el = document.getElementById("status");
@@ -103,9 +103,9 @@ async function main(): Promise<void> {
     status("Loading save…");
     const text = await (await fetch(SAVE_URL)).text();
     const game = await loadSaveFromText(text);
-    // default: Korea-ish framing from earlier work (world coords)
-    const cx = Number(q.get("x") ?? -4.5);
-    const cy = Number(q.get("y") ?? 12);
+    // default: densest forest cluster of the aztec reference world
+    const cx = Number(q.get("x") ?? 7.5);
+    const cy = Number(q.get("y") ?? 1);
     const r = Number(q.get("r") ?? 14);
     tiles = chunkFromSave(game, cx, cy, r);
     title = `Save chunk — ${tiles.length} tiles @ (${cx}, ${cy}) r=${r}`;
