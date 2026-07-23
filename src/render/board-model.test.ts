@@ -143,6 +143,36 @@ describe("board model from the REAL turn-518 save", () => {
     }
   });
 
+  test("relief: heightAtLocal is continuous across the hex boundary", () => {
+    // Probes just past the rim (mesh OVERLAP, finite-difference shading,
+    // blend-skirt corner spill) must continue the edge surface. Snapping back
+    // to centerH out there exploded the baked-shade gradient at every
+    // hill/flat border — the full-map "crazy patterns at height transitions".
+    const corners = hexCornerVectors();
+    const relief = model.tiles
+      .filter((t) => t.baseTerrain === "Mountain" || t.features.includes("Hill"))
+      .slice(0, 60);
+    expect(relief.length).toBeGreaterThan(0);
+    for (const t of relief) {
+      for (let sec = 0; sec < 6; sec++) {
+        const a = corners[sec]!;
+        const b = corners[(sec + 1) % 6]!;
+        // edge midpoint direction, sampled just inside and just outside
+        const mx = (a.x + b.x) / 2;
+        const my = (a.y + b.y) / 2;
+        const inside = heightAtLocal(t.height, t.cornerHeights, corners, {
+          x: mx * 0.995,
+          y: my * 0.995,
+        });
+        const outside = heightAtLocal(t.height, t.cornerHeights, corners, {
+          x: mx * 1.08,
+          y: my * 1.08,
+        });
+        expect(Math.abs(outside - inside)).toBeLessThan(0.02);
+      }
+    }
+  });
+
   test("no shearing: tiles on the same latitude share exact world Y", () => {
     const byLat = new Map<number, number[]>();
     for (const t of model.tiles) {

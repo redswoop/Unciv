@@ -199,8 +199,9 @@ export function heightAtLocal(
     if (Math.abs(denom) < 1e-12) continue;
     const wa = (local.x * b.y - local.y * b.x) / denom;
     const wb = (a.x * local.y - a.y * local.x) / denom;
+    if (wa < -1e-5 || wb < -1e-5) continue; // direction not in this sector wedge
     const w0 = 1 - wa - wb;
-    if (w0 >= -1e-5 && wa >= -1e-5 && wb >= -1e-5) {
+    if (w0 >= -1e-5) {
       const edgeW = Math.min(1, Math.max(0, wa + wb));
       const hA = cornerHeights[i]!;
       const hB = cornerHeights[(i + 1) % 6]!;
@@ -209,8 +210,11 @@ export function heightAtLocal(
       const t = edgeW ** 1.55;
       return centerH * (1 - t) + hEdge * t;
     }
+    // Outside the hex (overlap rims, finite-difference probes, skirt spill):
+    // continue flat along the ray past the edge. Snapping back to centerH was
+    // a cliff that blew up the baked-shade gradient at every hill/flat border.
+    return (wa * cornerHeights[i]! + wb * cornerHeights[(i + 1) % 6]!) / (wa + wb);
   }
-  // outside hex (overlap skirt): clamp to nearest corner blend
   return centerH;
 }
 

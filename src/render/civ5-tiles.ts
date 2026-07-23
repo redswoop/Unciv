@@ -105,6 +105,12 @@ export interface TerrainLook {
    */
   blendPriority?: number;
   /**
+   * How far this terrain's blend skirt reaches into a lower-priority
+   * neighbour, in world units (default 0.62). Mountains keep a short rocky
+   * fringe — a full-depth grey wash reads as fog rolling off the massif.
+   */
+  blendDepth?: number;
+  /**
    * Sample the digimap triplanar (projected from x/y/z by surface normal)
    * instead of flat world-plane UV. Planar UV smears into long vertical
    * streaks on steep faces — mountains need side projection.
@@ -164,6 +170,7 @@ const LOOKS: Record<string, TerrainLook> = {
     hScale: 0.88,
     flat: false,
     blendPriority: 8,
+    blendDepth: 0.34,
     triplanar: true,
     capDigimap: "euro_mountain_top_d.png",
   },
@@ -408,6 +415,65 @@ export function terrainHeightAt(
     return base + detail * 0.8;
   }
   return look.water ? 0 : piece;
+}
+
+/**
+ * Height of the RENDERED piecewise-linear terrain mesh at a local offset —
+ * terrainHeightAt evaluated on the same triangulated sector grid that
+ * buildTerrainMesh emits (including the OVERLAP xy scale). Blend skirts must
+ * sit on the mesh, not the analytic surface: on curved hill pieces the chord
+ * error of a divs-8 full-map mesh is ~10× the skirt lift, which z-fought as
+ * banded moiré at every height transition.
+ */
+export function meshHeightAt(
+  s: Civ5TileSpec,
+  look: TerrainLook,
+  hf: HeightField | null,
+  corners: readonly Vec2[],
+  divs: number,
+  lx: number,
+  ly: number,
+): number {
+  // mesh vertices sit at param*OVERLAP with z sampled at param
+  const px = lx / OVERLAP;
+  const py = ly / OVERLAP;
+  for (let i = 0; i < 6; i++) {
+    const a = corners[i]!;
+    const b = corners[(i + 1) % 6]!;
+    const denom = a.x * b.y - a.y * b.x;
+    if (Math.abs(denom) < 1e-12) continue;
+    let fi = ((px * b.y - py * b.x) / denom) * divs;
+    let fj = ((a.x * py - a.y * px) / denom) * divs;
+    if (fi < -1e-7 || fj < -1e-7) continue; // wrong sector wedge
+    const sum = fi + fj;
+    if (sum > divs) {
+      // outside the hex (corner spill): clamp to the rim
+      fi *= divs / sum;
+      fj *= divs / sum;
+    }
+    const i0 = Math.max(0, Math.min(divs - 1, Math.floor(fi)));
+    const j0 = Math.max(0, Math.min(divs - 1 - i0, Math.floor(fj)));
+    const ffi = fi - i0;
+    const ffj = fj - j0;
+    const zAt = (gi: number, gj: number) =>
+      terrainHeightAt(
+        s,
+        look,
+        hf,
+        corners,
+        (gi * a.x + gj * b.x) / divs,
+        (gi * a.y + gj * b.y) / divs,
+      );
+    if (ffi + ffj <= 1) {
+      return zAt(i0, j0) * (1 - ffi - ffj) + zAt(i0 + 1, j0) * ffi + zAt(i0, j0 + 1) * ffj;
+    }
+    return (
+      zAt(i0 + 1, j0 + 1) * (ffi + ffj - 1) +
+      zAt(i0, j0 + 1) * (1 - ffi) +
+      zAt(i0 + 1, j0) * (1 - ffj)
+    );
+  }
+  return terrainHeightAt(s, look, hf, corners, lx, ly);
 }
 
 export type AtlasCropMode = "forest" | "jungle";
@@ -774,15 +840,19 @@ const SHADE_FLAT = SHADE_L[2];
  * as shattered triangular shards. 1 on flat ground, brighter on sun-facing
  * slopes, darker on back slopes.
  */
-function slopeShade(dzdx: number, dzdy: number): number {
+function slopeShade(dzdx: number, dzdy: number, contrast = 1.5): number {
   const len = Math.hypot(dzdx, dzdy, 1);
   const dot = (-dzdx * SHADE_L[0] - dzdy * SHADE_L[1] + SHADE_L[2]) / len;
-  const shade = 1 + 1.5 * (dot - SHADE_FLAT);
-  return Math.min(1.3, Math.max(0.6, shade));
+  const shade = 1 + contrast * (dot - SHADE_FLAT);
+  return Math.min(1.35, Math.max(0.5, shade));
 }
 
-/** Side-projection repeat scale for triplanar sampling (repeats per world unit). */
-const TRIPLANAR_SIDE_UV = 0.45;
+/**
+ * Side-projection repeat scale for triplanar sampling (repeats per world unit).
+ * 512px digimap → ~0.9 keeps ≥1 texel/px at play zoom; the old 0.45 stretched
+ * one repeat across a whole face and read as a soft smear.
+ */
+const TRIPLANAR_SIDE_UV = 0.9;
 
 /**
  * Swap the material's planar map lookup for object-space triplanar sampling
@@ -814,7 +884,9 @@ function applyTriplanar(mat: THREE.MeshLambertMaterial, cap: THREE.Texture | nul
   vec4 capY = texture2D(capMap, vTriPos.xz * ${TRIPLANAR_SIDE_UV});
   vec4 capZ = texture2D(capMap, vTriPos.xy * ${DIGIMAP_UV});
   vec4 capC = capX * triW.x + capY * triW.y + capZ * triW.z;
-  float snow = smoothstep(0.24, 0.48, vRelief + (triC.r - 0.5) * 0.22);
+  // snowline: crest-only, edge broken up hard by the rock texture so it
+  // reads jagged (the old wide 0.24-0.48 band painted half the massif soft white)
+  float snow = smoothstep(0.33, 0.46, vRelief + (triC.r - 0.5) * 0.28);
   snow *= smoothstep(0.12, 0.45, normalize(vTriNormal).z);
   triC = mix(triC, capC, snow);`
       : "";
@@ -832,7 +904,17 @@ function applyTriplanar(mat: THREE.MeshLambertMaterial, cap: THREE.Texture | nul
   vec4 triX = texture2D(map, vTriPos.yz * ${TRIPLANAR_SIDE_UV});
   vec4 triY = texture2D(map, vTriPos.xz * ${TRIPLANAR_SIDE_UV});
   vec4 triZ = texture2D(map, vTriPos.xy * ${DIGIMAP_UV});
-  vec4 triC = triX * triW.x + triY * triW.y + triZ * triW.z;${capGlsl}
+  vec4 triC = triX * triW.x + triY * triW.y + triZ * triW.z;
+  // high-freq detail octave on the SIDE projections only: crisp rock grain
+  // at close zoom (the near-flat rim keeps matching the ground paint).
+  float sideW = triW.x + triW.y;
+  if (sideW > 0.03) {
+    vec3 detX = texture2D(map, vTriPos.yz * ${TRIPLANAR_SIDE_UV * 2.7}).rgb;
+    vec3 detY = texture2D(map, vTriPos.xz * ${TRIPLANAR_SIDE_UV * 2.7}).rgb;
+    vec3 det = (detX * triW.x + detY * triW.y) / sideW;
+    float detLum = dot(det, vec3(0.299, 0.587, 0.114));
+    triC.rgb *= mix(1.0, 0.55 + 1.05 * detLum, sideW * 0.85);
+  }${capGlsl}
   diffuseColor *= triC;
 #endif`,
       );
@@ -1057,10 +1139,12 @@ export class Civ5TileKit {
               // The merged mesh is unindexed triangle soup, so
               // computeVertexNormals() would give per-FACE normals — flat
               // shaded facets that read as chiseled shards on mountains.
-              const e = 0.06;
+              // mountains: finer step (128px piece ≈ 0.016/texel — 0.06
+              // averaged 4 texels and melted the crags) + harder contrast
+              const e = look.triplanar ? 0.02 : 0.06;
               const dzdx = (hAt(lx / OVERLAP + e, ly / OVERLAP) - z) / e;
               const dzdy = (hAt(lx / OVERLAP, ly / OVERLAP + e) - z) / e;
-              shade = slopeShade(dzdx, dzdy);
+              shade = slopeShade(dzdx, dzdy, look.triplanar ? 2.1 : 1.5);
               const inv = 1 / Math.hypot(dzdx, dzdy, 1);
               nx = -dzdx * inv;
               ny = -dzdy * inv;
@@ -1131,7 +1215,7 @@ export class Civ5TileKit {
     }
 
     // land-land terrain blending (Civ5-style continuous ground wash)
-    group.add(await this.buildBlendSkirts(tiles));
+    group.add(await this.buildBlendSkirts(tiles, divs));
 
     await this.addFeatureLayers(group, tiles, foliage);
     return group;
@@ -1144,7 +1228,7 @@ export class Civ5TileKit {
    * Reach is noise-modulated so the fringe reads organic, and heights/shade
    * are sampled from the NEIGHBOUR's surface so the wash lies on its ground.
    */
-  private async buildBlendSkirts(tiles: Civ5TileSpec[]): Promise<THREE.Group> {
+  private async buildBlendSkirts(tiles: Civ5TileSpec[], divs: number): Promise<THREE.Group> {
     const group = new THREE.Group();
     const posKey = (x: number, y: number) => `${Math.round(x * 100)}|${Math.round(y * 100)}`;
     const byPos = new Map<string, Civ5TileSpec>();
@@ -1158,9 +1242,9 @@ export class Civ5TileKit {
     }
     const batches = new Map<string, Batch>();
 
-    const E = 8; // segments along the edge
-    const R = 4; // rows across the blend band
-    const DEPTH = 0.55; // how far the wash reaches into the neighbour
+    const E = 12; // segments along the edge
+    const R = 6; // rows across the blend band
+    const DEPTH = 0.62; // how far the wash reaches into the neighbour
     const EXT = 0.1; // spill past edge ends so 3-way corners are covered
     const LIFT = 0.004;
 
@@ -1181,6 +1265,7 @@ export class Civ5TileKit {
         if ((lookS.blendPriority ?? 0) <= (lookN.blendPriority ?? 0)) continue;
 
         const hfN = await this.resolveHf(lookN, n.key);
+        const depthS = lookS.blendDepth ?? DEPTH;
         const dlen = Math.hypot(midx, midy);
         const ox = midx / dlen;
         const oy = midy / dlen;
@@ -1199,7 +1284,7 @@ export class Civ5TileKit {
             const t = -EXT + (e / E) * (1 + 2 * EXT);
             const bx = c1.x + (c2.x - c1.x) * t;
             const by = c1.y + (c2.y - c1.y) * t;
-            const d = (r / R) * DEPTH;
+            const d = (r / R) * depthS;
             const wx = s.world.x + bx + ox * d;
             const wy = s.world.y + by + oy * d;
             const lx = wx - n.world.x;
@@ -1209,11 +1294,21 @@ export class Civ5TileKit {
             const h0 = hAt(lx, ly);
             const eps = 0.06;
             const shade = slopeShade((hAt(lx + eps, ly) - h0) / eps, (hAt(lx, ly + eps) - h0) / eps);
-            // organic reach: noise stretches/shrinks the wash along the edge
-            const m = Math.min(1.35, 0.55 + 0.9 * blendNoise01(wx, wy));
-            const f = r / R / m;
-            const a = f >= 1 ? 0 : Math.pow(1 - f, 1.4);
-            row.push({ x: wx, y: wy, z: h0 + LIFT, shade, a });
+            // organic reach: noise SHRINKS the wash along the edge. It must
+            // never stretch it (old cap 1.35): any m>1 left alpha>0 on the
+            // outer row, ending the fringe in a visible hard line.
+            const m = 0.55 + 0.45 * blendNoise01(wx, wy);
+            const f = Math.min(1, r / R / m);
+            // steeper falloff + dappled breakup: the old 1.4 curve held a wide
+            // half-transparent zone that read as a milky film on bright desert
+            let a = Math.pow(1 - f, 1.9) * (0.78 + 0.44 * blendNoise01(wx * 3.7 + 11.3, wy * 3.7 - 5.1));
+            // feather the strip ends across the EXT spill so 3-way corners
+            // never expose a hard side cut of the band
+            a *= Math.min(1, (t + EXT) / (EXT + 0.06)) * Math.min(1, (1 + EXT - t) / (EXT + 0.06));
+            a = Math.min(1, Math.max(0, a));
+            // sit on the tessellated mesh surface, not the analytic one
+            const zMesh = meshHeightAt(n, lookN, hfN, this.corners, divs, lx, ly);
+            row.push({ x: wx, y: wy, z: zMesh + LIFT, shade, a });
           }
           grid.push(row);
         }
@@ -1223,7 +1318,11 @@ export class Civ5TileKit {
             for (const idx of [0, 1, 2, 2, 1, 3] as const) {
               const v = q[idx]!;
               batch.positions.push(v.x, v.y, v.z);
-              batch.uvs.push(v.x * DIGIMAP_UV, v.y * DIGIMAP_UV);
+              // triplanar terrains (mountain rock) wash at the tight side-
+              // projection scale: the flat 0.16 world UV stretched the rock
+              // into a blurry grey film over crisp neighbour ground
+              const uvScale = lookS.triplanar ? TRIPLANAR_SIDE_UV : DIGIMAP_UV;
+              batch.uvs.push(v.x * uvScale, v.y * uvScale);
               batch.colors.push(v.shade, v.shade, v.shade, v.a);
             }
           }
