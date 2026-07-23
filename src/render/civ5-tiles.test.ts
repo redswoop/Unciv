@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { buildBoardModel, type BoardModel } from "./board-model";
 import { loadSaveFromFile } from "../save/load-save";
@@ -9,6 +10,10 @@ import { SEABED_DEPTH } from "./board-model";
 
 const RULESET_DIR = join(import.meta.dir, "../../public/rulesets");
 const SAVE = join(import.meta.dir, "../../public/saves/turn518-14civs.unciv");
+// Extracted Firaxis assets are gitignored (come from a local Steam Civ5 via
+// cli/extract-civ5-assets.py) — asset-presence tests skip where they're absent (CI).
+const CIV5_DIR = join(import.meta.dir, "../../public/textures/civ5");
+const hasCiv5Assets = existsSync(CIV5_DIR);
 
 let model: BoardModel;
 
@@ -120,8 +125,8 @@ describe("civ5 tile kit against the REAL turn-518 save", () => {
     ]);
   });
 
-  test("extracted assets exist for every look used by this save", async () => {
-    const dir = join(import.meta.dir, "../../public/textures/civ5");
+  test.if(hasCiv5Assets)("extracted assets exist for every look used by this save", async () => {
+    const dir = CIV5_DIR;
     const files = new Set<string>();
     for (const t of model.tiles) {
       const look = lookFor(t.baseTerrain, t.features);
@@ -191,11 +196,11 @@ describe("civ5 tile kit against the REAL turn-518 save", () => {
     }
   });
 
-  test("relief heightmaps are not constant-flat duds", async () => {
+  test.if(hasCiv5Assets)("relief heightmaps are not constant-flat duds", async () => {
     // A mis-decoded piece (e.g. a 512x512 multi-hex cluster read as 128x128)
     // comes out as a constant image, which PNG-compresses to ~200 bytes and
     // silently renders the tile flat. Real pieces are several KB.
-    const dir = join(import.meta.dir, "../../public/textures/civ5");
+    const dir = CIV5_DIR;
     const files = new Set<string>();
     for (const t of model.tiles) {
       const look = lookFor(t.baseTerrain, t.features);
