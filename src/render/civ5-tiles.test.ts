@@ -4,7 +4,8 @@ import { buildBoardModel, type BoardModel } from "./board-model";
 import { loadSaveFromFile } from "../save/load-save";
 import { baseRulesetForSave, readRulesetFromDisk } from "../ruleset/ruleset";
 import { hexCornerVectors } from "../hex/hex-math";
-import { knownTerrains, lookFor } from "./civ5-tiles";
+import { knownTerrains, lookFor, needsWaterSurface, terrainHeightAt } from "./civ5-tiles";
+import { SEABED_DEPTH } from "./board-model";
 
 const RULESET_DIR = join(import.meta.dir, "../../public/rulesets");
 const SAVE = join(import.meta.dir, "../../public/saves/turn518-14civs.unciv");
@@ -132,6 +133,62 @@ describe("civ5 tile kit against the REAL turn-518 save", () => {
       if (!(await Bun.file(join(dir, f)).exists())) missing.push(f);
     }
     expect(missing).toEqual([]);
+  });
+
+  test("water: all water looks share ONE seabed material (no underwater seams)", () => {
+    for (const base of ["Coast", "Ocean", "Lakes", "Atoll"]) {
+      const look = lookFor(base, []);
+      expect(look.water).toBe(true);
+      expect(look.digimap).toBe("euro_coast_d.png");
+      expect(look.seabedDepth).toBeLessThan(0);
+    }
+    // ocean floor deeper than coast floor — drives the depth-LUT gradient
+    expect(lookFor("Ocean", []).seabedDepth!).toBeLessThan(lookFor("Coast", []).seabedDepth!);
+  });
+
+  test("water: seabed follows the welded board base — waterline is the z=0 contour", () => {
+    const corners = hexCornerVectors();
+    const coast = model.tiles.find((t) => t.baseTerrain === "Coast")!;
+    const spec = {
+      world: coast.world,
+      baseTerrain: coast.baseTerrain,
+      features: coast.features,
+      key: coast.key,
+      height: coast.height,
+      cornerHeights: coast.cornerHeights,
+    };
+    const look = lookFor(coast.baseTerrain, coast.features);
+    // center sits at the welded (negative) seabed — within the shoreline
+    // wobble amplitude (±0.065) that bends the waterline off hex geometry
+    expect(Math.abs(terrainHeightAt(spec, look, null, corners, 0, 0) - coast.height)).toBeLessThan(0.08);
+    expect(coast.height).toBeLessThan(0);
+    // without board heights (chunk/gallery demos) it falls back to the look depth
+    const bare = { ...spec, height: undefined, cornerHeights: undefined };
+    expect(terrainHeightAt(bare, look, null, corners, 0, 0)).toBe(SEABED_DEPTH.Coast!);
+  });
+
+  test("water surface covers every water tile + dipped shore tiles, not inland", () => {
+    const specs = model.tiles.map((t) => ({
+      world: t.world,
+      baseTerrain: t.baseTerrain,
+      features: t.features,
+      key: t.key,
+      height: t.height,
+      cornerHeights: t.cornerHeights,
+    }));
+    const water = specs.filter((s) => lookFor(s.baseTerrain, s.features).water);
+    expect(water.length).toBeGreaterThan(1000);
+    for (const s of water) expect(needsWaterSurface(s)).toBe(true);
+    const land = specs.filter((s) => !lookFor(s.baseTerrain, s.features).water);
+    const shore = land.filter((s) => needsWaterSurface(s));
+    const inland = land.filter((s) => !needsWaterSurface(s));
+    // the surface reaches into shoreline land tiles (where the waterline
+    // contour lives) but skips the dry interior
+    expect(shore.length).toBeGreaterThan(50);
+    expect(inland.length).toBeGreaterThan(1000);
+    for (const s of inland) {
+      expect(Math.min(...s.cornerHeights!)).toBeGreaterThanOrEqual(0.02);
+    }
   });
 
   test("relief heightmaps are not constant-flat duds", async () => {

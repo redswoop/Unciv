@@ -149,6 +149,40 @@ export function edgeCorners(
 }
 
 /**
+ * Seabed depth (negative world-z, water surface = 0) per water terrain.
+ * Civ5-style: the coastline is the z=0 contour of the seabed heightfield, and
+ * the coast→ocean transition is the depth-LUT tint over the deepening floor.
+ * Corner welding between coast and ocean tiles produces the smooth gradient.
+ */
+export const SEABED_DEPTH: Record<string, number> = {
+  Coast: -0.09,
+  Lakes: -0.07,
+  Ocean: -0.32,
+};
+
+export function seabedDepth(baseTerrain: string): number {
+  return SEABED_DEPTH[baseTerrain] ?? SEABED_DEPTH.Coast!;
+}
+
+/**
+ * Land tiles never drop below this: keeps tile centers (units, cities, the
+ * playable read of the hex) above the waterline while their shoreline corners
+ * weld down below 0. Also the floor that separates "inland low ground" from
+ * the shader's beach-sand band (painted below z≈0.04) — without it, noise-dipped
+ * inland plains would grow sand patches.
+ */
+export const LAND_MIN_H = 0.045;
+
+/**
+ * Cap for any welded corner shared with a water tile: the seabed must never
+ * breach the surface. Without this, corner averaging with tall neighbours
+ * (mountains: +0.78) hoisted water-tile floors above z=0 — whole coast/lake
+ * tiles rendered as dry hex-shaped sand plates. Capping is symmetric across
+ * the corner's trio, so the weld (identical heights on all sharers) holds.
+ */
+export const SHORE_CORNER_Z = -0.055;
+
+/**
  * Raw per-tile elevation contribution (pre-smoothing).
  * Tuned for Civ5-ish gentle relief: hills are broad bumps, mountains are
  * rounded massifs — not 6-tri tent spikes. Absolute scale is world-z units
@@ -160,7 +194,7 @@ export function tileElevation(
   isWater: boolean,
   naturalWonder?: string,
 ): number {
-  if (isWater) return 0;
+  if (isWater) return seabedDepth(baseTerrain);
   if (baseTerrain === "Mountain") return 0.78;
   if (naturalWonder) return 0.42;
   if (features.includes("Hill")) return 0.36;
@@ -315,11 +349,12 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
   }
 
   // ——— Laplacian smooth: blend each land tile with neighbours so massifs
-  // merge and hills roll instead of reading as isolated cones. Water locked. ———
+  // merge and hills roll instead of reading as isolated cones. Water locked
+  // at its seabed depth (negative — see SEABED_DEPTH). ———
   for (const rt of tiles) {
     const raw = rawHeight.get(rt.key)!;
-    if (raw === 0 && (rt.baseTerrain === "Ocean" || rt.baseTerrain === "Coast" || rt.baseTerrain === "Lakes")) {
-      rt.height = 0;
+    if (raw < 0) {
+      rt.height = raw;
       continue;
     }
     let sum = raw;
@@ -329,15 +364,18 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       const nKey = `${rt.hex.x + d.x},${rt.hex.y + d.y}`;
       const nr = rawHeight.get(nKey);
       if (nr === undefined) continue;
-      // water neighbours pull shores down gently; land neighbours blend
-      const nw = nr === 0 ? 0.55 : 0.45;
-      sum += nr * nw;
+      // water neighbours pull shores down gently — toward the beach, not the
+      // abyss (deep ocean capped at coast depth here; true depth still welds
+      // in via corner averaging below)
+      const nw = nr < 0 ? 0.55 : 0.45;
+      sum += Math.max(nr, SEABED_DEPTH.Coast!) * nw;
       w += nw;
     }
     // keep a solid fraction of self so mountains don't dissolve
     const selfW = rt.baseTerrain === "Mountain" ? 0.72 : 0.55;
     const blended = sum / w;
-    rt.height = selfW * raw + (1 - selfW) * blended;
+    // land centers stay above the waterline; corners may weld below it
+    rt.height = Math.max(LAND_MIN_H, selfW * raw + (1 - selfW) * blended);
   }
 
   // ——— corner heights: average over the tiles sharing each corner ———
@@ -351,16 +389,34 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       const clockB = NEIGHBOR_CLOCK_POSITIONS[i]!;
       let sum = rt.height;
       let n = 1;
+      let touchesWater = rt.height < 0;
       for (const clock of [clockA, clockB]) {
         const d = getClockPositionToHexcoord(clock);
         const neighbor = tileByKey.get(`${rt.hex.x + d.x},${rt.hex.y + d.y}`);
         if (neighbor) {
           sum += neighbor.height;
           n++;
+          if (neighbor.height < 0) touchesWater = true;
         }
       }
-      rt.cornerHeights[i] = sum / n;
+      // shoreline corners stay submerged (see SHORE_CORNER_Z) — land slopes
+      // INTO the sea and mountains become sea cliffs, instead of hoisting
+      // neighbouring seabed above the waterline
+      const c = sum / n;
+      rt.cornerHeights[i] = touchesWater ? Math.min(c, SHORE_CORNER_Z) : c;
     }
+  }
+
+  // ——— water centers: no dome. heightAtLocal keeps interiors near centerH,
+  // which turned every water tile into a bowl (deep center, shallow welded
+  // rim) — adjacent coast tiles read as sand ridges along every shared hex
+  // edge. Re-center each water tile on the plain MEAN of its welded corners:
+  // any deepening bias re-creates a donut (shallow rim, deep middle) in
+  // narrow bays whose corners are all capped at SHORE_CORNER_Z. The seaward
+  // depth grade comes entirely from corner variation. ———
+  for (const rt of tiles) {
+    if (rt.height >= 0) continue;
+    rt.height = rt.cornerHeights.reduce((s, h) => s + h, 0) / 6;
   }
 
   // patch unit z to post-smooth tile height (created before laplacian pass)
@@ -370,7 +426,8 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       const rt = tileByKey.get(posKey(tile.position))!;
       for (const unit of [tile.militaryUnit, tile.civilianUnit, ...(tile.airUnits ?? [])]) {
         if (!unit?.name) continue;
-        if (ui < units.length) units[ui]!.z = rt.height;
+        // water tiles have negative seabed heights — ships float at the surface
+        if (ui < units.length) units[ui]!.z = Math.max(rt.height, 0.02);
         ui++;
       }
     }
@@ -384,7 +441,7 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       name: city.name ?? "?",
       civ: civName,
       population: city.population?.population ?? 1,
-      z: tileByKey.get(posKey(city.location))?.height ?? 0,
+      z: Math.max(tileByKey.get(posKey(city.location))?.height ?? 0, 0.02),
     });
   }
 

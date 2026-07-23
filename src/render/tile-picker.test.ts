@@ -77,8 +77,10 @@ describe("tile picking against the REAL turn-518 save", () => {
       const picked = picker.pick(origin, dir);
       if (flat?.key !== m.key && picked?.key === m.key) fixedByRefinement++;
     }
-    // this map has exactly 10 such mountains at the default tilt
-    expect(fixedByRefinement).toBeGreaterThanOrEqual(10);
+    // this map has exactly 7 such mountains at the default tilt (was 10
+    // before seabed depths: negative water neighbours settle coastal
+    // mountains slightly lower)
+    expect(fixedByRefinement).toBeGreaterThanOrEqual(7);
   });
 
   test("rays that never descend or point off-map pick nothing", () => {

@@ -45,10 +45,14 @@ export class HexRayPicker<T extends PickableTile> {
     return this.byHex.get(`${hex.x},${hex.y}`);
   }
 
-  /** Terrain surface height at a world point (0 off-map). */
+  /**
+   * VISIBLE surface height at a world point (0 off-map). Terrain below sea
+   * level (seabed, underwater shore rims) is covered by the water plane at
+   * z=0 — the camera sees the water, so picking must too.
+   */
   heightAt(p: Vec2, tile = this.tileAt(p)): number {
     if (!tile) return 0;
-    return this.surfaceZ(tile, { x: p.x - tile.world.x, y: p.y - tile.world.y });
+    return Math.max(0, this.surfaceZ(tile, { x: p.x - tile.world.x, y: p.y - tile.world.y }));
   }
 
   /**

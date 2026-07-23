@@ -97,11 +97,26 @@ lower; all pinned in `civ5-tiles.test.ts`). Remaining gaps:
    midpoints (curve via city/tile centers) would read far better.
 4. **Unit markers are letter-initial billboards.** Even Civ5-style flag pins
    (pole + banner icon shape) would read better; unit-type icon atlas later.
-5. **Water is flat opaque, and land↔water edges are hard hex cliffs** — the
-   biggest remaining seam class now that land-land blends. Beach/foam wash at
-   coastlines + animated shimmer; coast-to-ocean gradient using the Artful
-   depth LUT (already sampled in `cli/generate-textures.ts`); `waterbumps` /
-   `waterdepthcolor` textures are already extracted.
+5. **Water (mostly done)** — Civ5-style system: water tiles carry negative
+   seabed depths (`SEABED_DEPTH`), the waterline is the z=0 contour of the
+   welded field. Geometry rules earned by iteration (each guards against a
+   regression we hit): land centers clamped ≥ `LAND_MIN_H`; every corner
+   touching water capped ≤ `SHORE_CORNER_Z` (else mountains hoist seabed
+   into dry hex plates); water centers = MEAN of welded corners (else each
+   tile is a bowl → sand ridges along every hex edge); `shoreWobble`
+   two-octave world noise displaces the field near the waterline at FULL
+   strength (else the coast runs parallel to hex edges — value noise RMS is
+   ~¼ of max, so amplitude must look oversized on paper), with water clamped
+   ≤ −0.008 so crests never beach. One shared seabed material (sand→reef by
+   depth, two-octave threshold noise); land materials mirror the exact same
+   floor formula × `WATER_GAIN` below the waterline (hex-edge seams
+   otherwise); translucent z=0 surface driven by Firaxis' `waterdepthcolor`
+   LUT (RGB = tint, ALPHA = opacity ramp) + animated foam. Calibration
+   traps: load the LUT **non-sRGB** (hardware decode + ACES crushes its navy
+   to black), NO normal map on the surface (minification → binary speckle;
+   bumps only feed foam noise), beach/floor shader passes only on welded
+   boards (standalone chunk tiles sit at FLAT_Z ≈ the sand band). Remaining:
+   close-zoom shimmer, Ice feature look, mountain-foot rock/beach blend.
 6. **No fog of war** — everything is visible. Save carries per-civ
    `exploredTiles`; a "view as civ X" toggle + darkened unexplored tiles is
    pure board-model work.

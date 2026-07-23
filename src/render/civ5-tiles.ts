@@ -15,7 +15,7 @@
 
 import * as THREE from "three";
 import { hexCornerVectors, type Vec2 } from "../hex/hex-math";
-import { heightAtLocal } from "./board-model";
+import { heightAtLocal, SEABED_DEPTH } from "./board-model";
 
 const ROOT = "textures/civ5/";
 const H_BASE = 60;
@@ -92,6 +92,11 @@ export interface TerrainLook {
   flat: boolean;
   water?: boolean;
   /**
+   * Seabed z for standalone tiles (no welded board heights — chunk/gallery
+   * demos). With board heights the welded base already carries SEABED_DEPTH.
+   */
+  seabedDepth?: number;
+  /**
    * Linear-space RGB gain applied as material color. Calibrated so the
    * rendered ground ≈ source digimap × 0.75 with channel ratios preserved —
    * matching how flat open ground reads in the real Civ5 frame capture
@@ -122,6 +127,13 @@ export interface TerrainLook {
    */
   capDigimap?: string;
 }
+
+/**
+ * Material gain for the underwater floor (seabed tiles AND the submerged rim
+ * of land tiles — both must multiply to identical pixels at the hex edge).
+ * Cool blue lift so the wet floor reads submerged, not dusty.
+ */
+const WATER_GAIN: [number, number, number] = [1.3, 1.35, 1.5];
 
 const LOOKS: Record<string, TerrainLook> = {
   Grassland: {
@@ -174,26 +186,35 @@ const LOOKS: Record<string, TerrainLook> = {
     triplanar: true,
     capDigimap: "euro_mountain_top_d.png",
   },
+  // All water shares ONE seabed material (sand digimap, reef blended in by
+  // depth in-shader) — a single group means no digimap seams underwater; the
+  // coast/ocean difference is real geometry depth + the depth-LUT water tint.
   Coast: {
     digimap: "euro_coast_d.png",
     heights: [],
     hScale: 0,
     flat: true,
     water: true,
+    seabedDepth: SEABED_DEPTH.Coast,
+    gain: WATER_GAIN,
   },
   Ocean: {
-    digimap: "euro_shallow_seas_d.png",
+    digimap: "euro_coast_d.png",
     heights: [],
     hScale: 0,
     flat: true,
     water: true,
+    seabedDepth: SEABED_DEPTH.Ocean,
+    gain: WATER_GAIN,
   },
   Lakes: {
-    digimap: "euro_shallow_seas_d.png",
+    digimap: "euro_coast_d.png",
     heights: [],
     hScale: 0,
     flat: true,
     water: true,
+    seabedDepth: SEABED_DEPTH.Lakes,
+    gain: WATER_GAIN,
   },
   Marsh: {
     digimap: "marsh_d.png",
@@ -222,6 +243,8 @@ const LOOKS: Record<string, TerrainLook> = {
     hScale: 0,
     flat: true,
     water: true,
+    seabedDepth: -0.05,
+    gain: WATER_GAIN,
   },
 };
 
@@ -347,6 +370,24 @@ function valueNoise(x: number, y: number): number {
 }
 
 /**
+ * World-space shoreline wobble: the coastline is the z=0 contour of the
+ * welded height field, which is piecewise per hex sector — without noise its
+ * contours run parallel to hex edges and turn at corner angles. Two octaves
+ * (long meanders + chop) displace the field vertically near the waterline so
+ * the contour wanders organically, Civ5-style. Zero-mean, aperiodic,
+ * continuous across tiles.
+ */
+export function shoreWobble(wx: number, wy: number): number {
+  const n1 = valueNoise(wx * 0.55 + 7.3, wy * 0.55 - 3.1) - 0.5;
+  const n2 = valueNoise(wx * 2.2 - 11.9, wy * 2.2 + 5.7) - 0.5;
+  // Sized so TYPICAL displacement (value noise clusters near its midpoint —
+  // RMS ≈ a quarter of the max) wanders the waterline a visible fraction of
+  // a hex. Water tiles clamp the wobbled crest below the surface, so the
+  // occasional big positive swing can't beach the seabed.
+  return n1 * 0.1 + n2 * 0.03;
+}
+
+/**
  * Tiny deterministic micro-relief so flat digimap land isn't a plastic sheet.
  * Takes WORLD coordinates: sine waves in tile-local space stamped the same
  * interference pattern on every tile, which the baked hillshade turned into a
@@ -405,16 +446,24 @@ export function terrainHeightAt(
   const piece = sampleHeight(hf, lx, ly, s.world.x + lx, s.world.y + ly);
   if (s.cornerHeights && s.height !== undefined) {
     const base = heightAtLocal(s.height, s.cornerHeights, corners, { x: lx, y: ly });
-    if (look.water) return 0;
-    if (look.flat) {
-      // micro-relief: tiny piece/noise already baked into board height
-      return base;
-    }
+    // shoreline wobble at FULL strength at and below the waterline (this is
+    // what bends the z=0 contour off the hex geometry), fading out a little
+    // above it so inland ground is untouched. The SAME term applies to land
+    // and water, so hex edges stay crack-free. Underwater it doubles as
+    // grain that breaks up per-tile depth plateaus.
+    const wobbleW = 1 - Math.min(1, Math.max(0, (base - 0.015) / 0.045));
+    const grain = wobbleW > 0 ? shoreWobble(s.world.x + lx, s.world.y + ly) * wobbleW : 0;
+    // water: welded seabed, exactly like flat land — the waterline is the
+    // z=0 contour of this shared heightfield (Civ5's organic coastline).
+    // Water stays strictly submerged: a big positive wobble swing must not
+    // beach the floor (land has no clamp — its dips become lagoons).
+    if (look.water) return Math.min(base + grain, -0.008);
+    if (look.flat) return base + grain;
     // Firaxis hill/mountain shape as high-freq detail on welded base
     const detail = piece - FLAT_Z;
-    return base + detail * 0.8;
+    return base + detail * 0.8 + grain;
   }
-  return look.water ? 0 : piece;
+  return look.water ? (look.seabedDepth ?? SEABED_DEPTH.Coast!) : piece;
 }
 
 /**
@@ -921,6 +970,120 @@ function applyTriplanar(mat: THREE.MeshLambertMaterial, cap: THREE.Texture | nul
   };
 }
 
+/**
+ * Seabed material: the sand digimap (map) washes into the green reef floor
+ * (euro_shallow_seas) as the bottom deepens — Civ5's coast look is this reef
+ * texture seen through shallow water. Blend keys on world z so it follows the
+ * welded seabed geometry, not hex edges.
+ */
+function applySeabedBlend(mat: THREE.MeshLambertMaterial, reefMap: THREE.Texture): void {
+  mat.customProgramCacheKey = () => "civ5-seabed";
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.reefMap = { value: reefMap };
+    shader.vertexShader = shader.vertexShader
+      .replace("void main() {", "varying vec3 vSeaPos;\nvoid main() {")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvSeaPos = position;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "void main() {",
+        "uniform sampler2D reefMap;\nvarying vec3 vSeaPos;\nvoid main() {",
+      )
+      .replace(
+        "#include <map_fragment>",
+        `#ifdef USE_MAP
+  vec2 seaUv = vSeaPos.xy * ${DIGIMAP_UV};
+  vec4 sandC = texture2D(map, seaUv);
+  vec4 reefC = texture2D(reefMap, seaUv);
+  // narrow sandy fringe at the waterline, reef floor right after. The band
+  // edge is wobbled by texture noise: the welded dome's sector kinks
+  // otherwise draw the sand/reef boundary as straight polygon arcs.
+  // low-freq octave meanders the boundary, speckle octave roughens it
+  float seaN = (texture2D(map, seaUv * 0.31).g - 0.5) * 0.035
+             + (texture2D(map, seaUv * 3.7).g - 0.5) * 0.02;
+  float reefW = smoothstep(0.008, 0.07, -vSeaPos.z + seaN);
+  diffuseColor *= mix(sandC, reefC, reefW);
+#endif`,
+      );
+  };
+}
+
+/**
+ * Land material shore pass, mirroring the seabed material: a narrow beach
+ * strip at the waterline, and below it the SAME sand→reef floor at the SAME
+ * effective gain — the submerged rim of land tiles must be pixel-identical
+ * to the neighbouring water tiles' floor or the hex edge shows as a seam.
+ * Inland ground never reaches the band — land centers are clamped to
+ * LAND_MIN_H and shoreline corners are capped at SHORE_CORNER_Z.
+ */
+function applyShoreSand(
+  mat: THREE.MeshLambertMaterial,
+  sandMap: THREE.Texture,
+  reefMap: THREE.Texture,
+  gain?: [number, number, number],
+): void {
+  const g = gain ?? [1.05, 1.05, 1.05];
+  mat.customProgramCacheKey = () => "civ5-shore-sand";
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.sandMap = { value: sandMap };
+    shader.uniforms.reefMap = { value: reefMap };
+    // material color (per-terrain gain) multiplies diffuse before the map;
+    // scale floor samples by WATER_GAIN/gain so they land at WATER_GAIN net
+    shader.uniforms.floorGain = {
+      value: new THREE.Vector3(
+        WATER_GAIN[0] / g[0],
+        WATER_GAIN[1] / g[1],
+        WATER_GAIN[2] / g[2],
+      ),
+    };
+    shader.vertexShader = shader.vertexShader
+      .replace("void main() {", "varying vec3 vShorePos;\nvoid main() {")
+      .replace("#include <begin_vertex>", "#include <begin_vertex>\nvShorePos = position;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "void main() {",
+        "uniform sampler2D sandMap;\nuniform sampler2D reefMap;\nuniform vec3 floorGain;\nvarying vec3 vShorePos;\nvoid main() {",
+      )
+      .replace(
+        "#include <map_fragment>",
+        `#ifdef USE_MAP
+  vec4 shoreTexC = texture2D(map, vMapUv);
+  // narrow beach strip hugging the waterline, edge wobbled by texture noise
+  // so it doesn't trace the welded dome's straight sector contours
+  vec2 shoreUv = vShorePos.xy * ${DIGIMAP_UV};
+  // same two-octave wobble as the seabed material so the bands line up
+  float shoreN = (texture2D(sandMap, shoreUv * 0.31).g - 0.5) * 0.035
+               + (texture2D(sandMap, shoreUv * 3.7).g - 0.5) * 0.02;
+  float sandW = 1.0 - smoothstep(0.004, 0.02, vShorePos.z + shoreN * 0.5);
+  if (sandW > 0.001) {
+    // same floor formula as the seabed material (sand → reef with depth)
+    vec4 sandC = texture2D(sandMap, shoreUv);
+    vec4 reefC = texture2D(reefMap, shoreUv);
+    float reefW = smoothstep(0.008, 0.07, -vShorePos.z + shoreN);
+    vec4 floorC = mix(sandC, reefC, reefW);
+    floorC.rgb *= floorGain;
+    shoreTexC = mix(shoreTexC, floorC, sandW);
+  }
+  diffuseColor *= shoreTexC;
+#endif`,
+      );
+  };
+}
+
+/**
+ * Tiles the translucent water surface must cover: every water tile, plus any
+ * land tile whose welded rim dips to (or below) the waterline — the organic
+ * shoreline contour crosses INSIDE those tiles, so the surface has to reach in
+ * to meet it.
+ */
+export function needsWaterSurface(s: Civ5TileSpec): boolean {
+  const look = lookFor(s.baseTerrain, s.features);
+  if (look.water) return true;
+  if (!s.cornerHeights) return false;
+  // 0.07 margin: shoreWobble (±0.04) can pull near-shore land below the
+  // waterline between its corners — those lagoon dips need surface cover
+  return Math.min(...s.cornerHeights) < 0.07;
+}
+
 export class Civ5TileKit {
   private digimapCache = new Map<string, THREE.Texture>();
   private heightCache = new Map<string, HeightField | null>();
@@ -1134,26 +1297,28 @@ export class Civ5TileKit {
             const relief = reliefs
               ? z - terrainHeightAt(s, look, null, this.corners, lx / OVERLAP, ly / OVERLAP)
               : 0;
-            let shade = 1;
-            let nx = 0;
-            let ny = 0;
-            let nz = 1;
-            if (!look.water) {
-              // smooth hillshade + analytic normal from the height gradient.
-              // The merged mesh is unindexed triangle soup, so
-              // computeVertexNormals() would give per-FACE normals — flat
-              // shaded facets that read as chiseled shards on mountains.
-              // mountains: finer step (128px piece ≈ 0.016/texel — 0.06
-              // averaged 4 texels and melted the crags) + harder contrast
-              const e = look.triplanar ? 0.02 : 0.06;
-              const dzdx = (hAt(lx / OVERLAP + e, ly / OVERLAP) - z) / e;
-              const dzdy = (hAt(lx / OVERLAP, ly / OVERLAP + e) - z) / e;
-              shade = slopeShade(dzdx, dzdy, look.triplanar ? 2.1 : 1.5);
-              const inv = 1 / Math.hypot(dzdx, dzdy, 1);
-              nx = -dzdx * inv;
-              ny = -dzdy * inv;
-              nz = inv;
+            // smooth hillshade + analytic normal from the height gradient.
+            // The merged mesh is unindexed triangle soup, so
+            // computeVertexNormals() would give per-FACE normals — flat
+            // shaded facets that read as chiseled shards on mountains.
+            // mountains: finer step (128px piece ≈ 0.016/texel — 0.06
+            // averaged 4 texels and melted the crags) + harder contrast.
+            // Water gets it too: the seabed is real sloped geometry now.
+            const e = look.triplanar ? 0.02 : 0.06;
+            const dzdx = (hAt(lx / OVERLAP + e, ly / OVERLAP) - z) / e;
+            const dzdy = (hAt(lx / OVERLAP, ly / OVERLAP + e) - z) / e;
+            let shade = slopeShade(dzdx, dzdy, look.triplanar ? 2.1 : 1.5);
+            // the shore drop is the steepest slope on the map — full hillshade
+            // painted a charcoal band along every waterline. Flatten shading
+            // progressively below the surface; light underwater diffuses.
+            if (z < 0.02) {
+              const soften = Math.min(1, (0.02 - z) / 0.1);
+              shade += (1 - shade) * soften * 0.5;
             }
+            const inv = 1 / Math.hypot(dzdx, dzdy, 1);
+            const nx = -dzdx * inv;
+            const ny = -dzdy * inv;
+            const nz = inv;
             return [cx + lx, cy + ly, z, shade, nx, ny, nz, relief];
           };
           for (let i = 0; i < d; i++) {
@@ -1194,35 +1359,197 @@ export class Civ5TileKit {
       if (reliefs) geo.setAttribute("aRelief", new THREE.BufferAttribute(reliefs, 1));
 
       const map = await this.digimap(matLook.digimap);
-      const mat = matLook.water
-        ? new THREE.MeshLambertMaterial({
-            map,
-            color: new THREE.Color(
-              matLook.digimap.includes("shallow") ? 0x3a7a9a : 0x1e4a72,
-            ),
-            transparent: true,
-            opacity: 0.9,
-          })
-        : new THREE.MeshLambertMaterial({
-            map,
-            // calibrated per-terrain gain (see TerrainLook.gain)
-            color: new THREE.Color(...(matLook.gain ?? [1.05, 1.05, 1.05])),
-            // baked hillshade lives in vertex colors
-            vertexColors: true,
-          });
-      if (matLook.triplanar && !matLook.water) {
+      const mat = new THREE.MeshLambertMaterial({
+        map,
+        // calibrated per-terrain gain (see TerrainLook.gain)
+        color: new THREE.Color(...(matLook.gain ?? [1.05, 1.05, 1.05])),
+        // baked hillshade lives in vertex colors
+        vertexColors: true,
+      });
+      if (matLook.water) {
+        // opaque seabed: sand at the shore, reef floor as it deepens.
+        // The water itself is a separate translucent surface at z=0.
+        applySeabedBlend(mat, await this.digimap("euro_shallow_seas_d.png"));
+      } else if (matLook.triplanar) {
         const cap = matLook.capDigimap ? await this.digimap(matLook.capDigimap) : null;
-        applyTriplanar(mat as THREE.MeshLambertMaterial, cap);
+        applyTriplanar(mat, cap);
+      } else if (specs.some((s) => s.cornerHeights)) {
+        // land near the waterline gets the same beach + underwater floor as
+        // the seabed material. Welded boards only: standalone tiles
+        // (chunk/gallery) all rest at FLAT_Z ≈ the sand band, which bleached
+        // the whole demo beige.
+        applyShoreSand(
+          mat,
+          await this.digimap("euro_coast_d.png"),
+          await this.digimap("euro_shallow_seas_d.png"),
+          matLook.gain,
+        );
       }
 
       group.add(new THREE.Mesh(geo, mat));
     }
+
+    // translucent depth-tinted water surface over everything below z=0
+    const water = await this.buildWaterSurface(tiles, divs);
+    if (water) group.add(water);
 
     // land-land terrain blending (Civ5-style continuous ground wash)
     group.add(await this.buildBlendSkirts(tiles, divs));
 
     await this.addFeatureLayers(group, tiles, foliage);
     return group;
+  }
+
+  /** Texture loaded verbatim (digimap() bakes A=255 — the depth LUT NEEDS its alpha ramp). */
+  private async rawTexture(file: string, srgb: boolean, clamp: boolean): Promise<THREE.Texture | null> {
+    const img = await loadImage(ROOT + file);
+    if (!img) return null;
+    const t = new THREE.Texture(img);
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = clamp ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+    t.anisotropy = 8;
+    t.needsUpdate = true;
+    return t;
+  }
+
+  /**
+   * Translucent water surface at z=0, Civ5-style: per-vertex seabed depth
+   * drives Firaxis' waterdepthcolor LUT — its RGB is the shallow-teal → deep-
+   * navy tint and its ALPHA is the baked opacity ramp (transparent over the
+   * sandy shallows, solid over the ocean floor). Fragments where the terrain
+   * rises above the waterline are discarded, so the water's edge is the
+   * seabed's z=0 contour, with animated lapping foam hugging it. waterbumps
+   * scrolls as a normal map for sun shimmer.
+   */
+  private async buildWaterSurface(
+    tiles: Civ5TileSpec[],
+    divs: number,
+  ): Promise<THREE.Mesh | null> {
+    const wet = tiles.filter(needsWaterSurface);
+    if (wet.length === 0) return null;
+    // LUT stays NON-sRGB on purpose: skipping the decode while the renderer
+    // still encodes output ≈ a gamma lift that lands Firaxis' navy at Civ5's
+    // rendered water tones — with hardware decode, ACES crushed it to black.
+    const lut = await this.rawTexture("waterdepthcolor.png", false, true);
+    const bumps = await this.rawTexture("waterbumps.png", false, false);
+    if (!lut) return null;
+
+    const tPer = 6 * divs * divs;
+    const positions = new Float32Array(wet.length * tPer * 9);
+    const uvs = new Float32Array(wet.length * tPer * 6);
+    const normals = new Float32Array(wet.length * tPer * 9);
+    const depths = new Float32Array(wet.length * tPer * 3);
+    let p = 0;
+    let u = 0;
+    let nw = 0;
+    let dw = 0;
+
+    for (const s of wet) {
+      const look = lookFor(s.baseTerrain, s.features);
+      for (let sec = 0; sec < 6; sec++) {
+        const a = this.corners[sec]!;
+        const b = this.corners[(sec + 1) % 6]!;
+        const emit = (i: number, j: number) => {
+          const lx = ((i * a.x + j * b.x) / divs) * OVERLAP;
+          const ly = ((i * a.y + j * b.y) / divs) * OVERLAP;
+          const x = s.world.x + lx;
+          const y = s.world.y + ly;
+          // piece hf omitted: near the waterline flat land and seabed follow
+          // the welded base exactly; hill detail only matters far above it
+          const depth = -terrainHeightAt(s, look, null, this.corners, lx / OVERLAP, ly / OVERLAP);
+          positions[p++] = x;
+          positions[p++] = y;
+          positions[p++] = 0;
+          uvs[u++] = x * DIGIMAP_UV;
+          uvs[u++] = y * DIGIMAP_UV;
+          normals[nw++] = 0;
+          normals[nw++] = 0;
+          normals[nw++] = 1;
+          depths[dw++] = depth;
+        };
+        for (let i = 0; i < divs; i++) {
+          for (let j = 0; j < divs - i; j++) {
+            emit(i, j);
+            emit(i, j + 1);
+            emit(i + 1, j);
+            if (j < divs - i - 1) {
+              emit(i + 1, j);
+              emit(i, j + 1);
+              emit(i + 1, j + 1);
+            }
+          }
+        }
+      }
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+    geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+    geo.setAttribute("aDepth", new THREE.BufferAttribute(depths, 1));
+
+    // NO normal map: at map zoom its minified high-freq field aliases into
+    // hard binary speckle across the whole ocean (diffuse AND specular) — a
+    // flat surface gives a clean broad sun sheen instead. waterbumps is only
+    // sampled as plain noise to animate the foam fringe.
+    const mat = new THREE.MeshPhongMaterial({
+      transparent: true,
+      specular: new THREE.Color(0x3a4c58),
+      shininess: 60,
+    });
+    const uTime = { value: 0 };
+    mat.customProgramCacheKey = () => `civ5-water|${bumps ? "b" : ""}`;
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.depthLut = { value: lut };
+      shader.uniforms.uTime = uTime;
+      if (bumps) shader.uniforms.bumpsTex = { value: bumps };
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          "void main() {",
+          "attribute float aDepth;\nvarying float vDepth;\nvarying vec2 vWaterUv;\nvoid main() {",
+        )
+        .replace(
+          "#include <begin_vertex>",
+          "#include <begin_vertex>\nvDepth = aDepth;\nvWaterUv = uv;",
+        );
+      shader.fragmentShader = shader.fragmentShader
+        .replace(
+          "void main() {",
+          `uniform sampler2D depthLut;\nuniform float uTime;\n${bumps ? "uniform sampler2D bumpsTex;\n" : ""}varying float vDepth;\nvarying vec2 vWaterUv;\nvoid main() {`,
+        )
+        .replace(
+          "#include <map_fragment>",
+          `
+  if (vDepth <= 0.0) discard;
+  float relD = clamp(vDepth / 0.33, 0.0, 1.0);
+  // LUT u: seabed depth vs full-ocean reference; pow widens the shallow band
+  float dT = pow(relD, 0.7);
+  vec4 lutC = texture2D(depthLut, vec2(mix(0.02, 0.98, dT), 0.5));
+  // opacity: Firaxis' baked alpha ramp, but pushed deeper — Civ5 coast water
+  // is glassy enough to read the reef floor through it. Fully opaque over the
+  // deep ocean: the output gamma lift turns even a 4% seabed leak into
+  // visible speckle.
+  float aU = mix(0.02, 0.98, pow(relD, 1.3));
+  float waterA = max(texture2D(depthLut, vec2(aU, 0.5)).a, 0.3);
+  waterA = mix(waterA, 1.0, smoothstep(0.6, 0.95, relD));
+${
+  bumps
+    ? `  // lapping foam: waterline band, broken and animated by the bump texture
+  float foamN1 = texture2D(bumpsTex, vWaterUv * 1.7 + vec2(uTime * 0.010, uTime * 0.006)).g;
+  float foamN2 = texture2D(bumpsTex, vWaterUv * 3.1 - vec2(uTime * 0.007, uTime * 0.011)).g;
+  float foamEdge = 1.0 - smoothstep(0.0, 0.035, vDepth);
+  float foam = foamEdge * smoothstep(0.35, 0.7, 0.5 * (foamN1 + foamN2) + foamEdge * 0.5);`
+    : "  float foam = 0.0;"
+}
+  diffuseColor = vec4(mix(lutC.rgb, vec3(0.94, 0.97, 0.98), foam), max(waterA, foam * 0.9));`,
+        );
+    };
+
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.onBeforeRender = () => {
+      uTime.value = (performance.now() % 3600000) / 1000;
+    };
+    return mesh;
   }
 
   /**

@@ -1,6 +1,13 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { buildBoardModel, heightAtLocal, type BoardModel } from "./board-model";
+import {
+  buildBoardModel,
+  heightAtLocal,
+  LAND_MIN_H,
+  SEABED_DEPTH,
+  SHORE_CORNER_Z,
+  type BoardModel,
+} from "./board-model";
 import { loadSaveFromFile } from "../save/load-save";
 import { baseRulesetForSave, readRulesetFromDisk } from "../ruleset/ruleset";
 import { hexCornerVectors } from "../hex/hex-math";
@@ -101,13 +108,22 @@ describe("board model from the REAL turn-518 save", () => {
     }
   });
 
-  test("relief: water flat, land raised, mountains highest", () => {
+  test("relief: water fully submerged, land raised, mountains highest", () => {
     let maxMtn = 0;
     let maxHill = 0;
     let maxFlat = 0;
+    const depths: Record<string, { sum: number; n: number }> = {};
     for (const t of model.tiles) {
       if (t.baseTerrain === "Ocean" || t.baseTerrain === "Coast" || t.baseTerrain === "Lakes") {
-        expect(t.height).toBe(0);
+        // centers re-derived from welded corners (no per-tile bowl), and the
+        // whole tile — corners included — stays below the waterline
+        expect(t.height).toBeLessThanOrEqual(SHORE_CORNER_Z + 1e-9);
+        for (const c of t.cornerHeights) {
+          expect(c).toBeLessThanOrEqual(SHORE_CORNER_Z + 1e-9);
+        }
+        const d = (depths[t.baseTerrain] ??= { sum: 0, n: 0 });
+        d.sum += t.height;
+        d.n++;
       } else if (t.baseTerrain === "Mountain") {
         expect(t.height).toBeGreaterThan(0.25);
         maxMtn = Math.max(maxMtn, t.height);
@@ -122,6 +138,47 @@ describe("board model from the REAL turn-518 save", () => {
     // mountains dominate, hills sit above plains — soft hierarchy, not tents
     expect(maxMtn).toBeGreaterThan(maxHill);
     expect(maxHill).toBeGreaterThan(maxFlat);
+    // the depth-LUT gradient needs ocean floors deeper than coast on average
+    const avg = (k: string) => depths[k]!.sum / depths[k]!.n;
+    expect(avg("Ocean")).toBeLessThan(avg("Coast"));
+  });
+
+  test("coastline: land centers float, shoreline corners weld underwater", () => {
+    const land = model.tiles.filter(
+      (t) => t.baseTerrain !== "Ocean" && t.baseTerrain !== "Coast" && t.baseTerrain !== "Lakes",
+    );
+    // every land CENTER stays above the waterline (units/cities never drown,
+    // and the beach-sand shader band stays exclusive to shores)
+    for (const t of land) expect(t.height).toBeGreaterThanOrEqual(LAND_MIN_H);
+    // ...but shoreline tiles dip their welded corners BELOW z=0, so the
+    // rendered waterline is an organic contour crossing inside the hex —
+    // not a hex-edge cliff
+    const dipped = land.filter((t) => Math.min(...t.cornerHeights) < 0);
+    expect(dipped.length).toBeGreaterThan(50);
+    // inland tiles stay fully dry
+    const dry = land.filter((t) => Math.min(...t.cornerHeights) >= LAND_MIN_H);
+    expect(dry.length).toBeGreaterThan(1000);
+  });
+
+  test("coastline: coast→ocean welds a smooth depth gradient", () => {
+    const coast = model.tiles.filter((t) => t.baseTerrain === "Coast");
+    expect(coast.length).toBeGreaterThan(100);
+    // near-shore coast corners rise to the shore cap; ocean-facing coast
+    // corners sink toward ocean depth — the smooth teal→navy transition
+    expect(coast.some((t) => Math.max(...t.cornerHeights) > SHORE_CORNER_Z - 0.005)).toBe(true);
+    expect(coast.some((t) => Math.min(...t.cornerHeights) < -0.15)).toBe(true);
+    // no coast corner ever dips below true ocean depth (positive corners are
+    // fine — mountains weld sea-cliff rims well above the waterline)
+    for (const t of coast) {
+      for (const c of t.cornerHeights) {
+        expect(c).toBeGreaterThanOrEqual(SEABED_DEPTH.Ocean!);
+      }
+    }
+  });
+
+  test("coastline: ships and coastal cities sit at/above the water surface", () => {
+    for (const u of model.units) expect(u.z).toBeGreaterThanOrEqual(0.02);
+    for (const c of model.cities) expect(c.z).toBeGreaterThanOrEqual(0.02);
   });
 
   test("relief: heightfield is a dome — interior above edge average on peaks", () => {
