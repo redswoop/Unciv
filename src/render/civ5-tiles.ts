@@ -149,7 +149,7 @@ const LOOKS: Record<string, TerrainLook> = {
   },
   Mountain: {
     digimap: "euro_mountain_base_d.png",
-    heights: ["mountain_11_h.png", "mountain_12_h.png", "mountain_21_h.png"],
+    heights: ["mountain_11_h.png", "mountain_12_h.png"],
     hScale: 0.88,
     flat: false,
     blendPriority: 8,
@@ -205,12 +205,14 @@ const LOOKS: Record<string, TerrainLook> = {
   },
 };
 
+// Firaxis ships exactly two single-hex hill height shapes, reused by every
+// terrain (the *_2_x/3_x pieces are multi-hex clusters we can't place per-tile).
 const HILL_HEIGHTS: Record<string, string[]> = {
-  Grassland: ["grass_hill_01_h.png", "grass_hill_02_h.png", "grass_hill_21_h.png"],
-  Plains: ["plains_hill_01_h.png", "plains_hill_02_h.png", "plains_hill_21_h.png"],
+  Grassland: ["grass_hill_01_h.png", "grass_hill_02_h.png"],
+  Plains: ["plains_hill_01_h.png", "plains_hill_02_h.png"],
   Desert: ["desert_hill_01_h.png", "desert_hill_12_h.png"],
-  Tundra: ["tundra_hill_01_h.png"],
-  Snow: ["tundra_hill_01_h.png"],
+  Tundra: ["tundra_hill_01_h.png", "tundra_hill_12_h.png"],
+  Snow: ["tundra_hill_01_h.png", "tundra_hill_12_h.png"],
 };
 
 function hashKey(s: string): number {
@@ -873,18 +875,30 @@ export class Civ5TileKit {
     const divs = opts.divs ?? TILE_DIVS;
     const foliage = opts.foliage ?? (divs >= 14 ? "detail" : "full");
 
-    const byDigi = new Map<string, { specs: Civ5TileSpec[]; look: TerrainLook }>();
+    // Group by material identity (digimap + gain + water) so one mesh/material
+    // serves the group — but every tile keeps its OWN look: flat and hill
+    // variants of a terrain share the digimap, and collapsing them to the
+    // group's look gave hills to flats (or flattened hills) by iteration order.
+    const byMat = new Map<
+      string,
+      { specs: Civ5TileSpec[]; looks: TerrainLook[]; look: TerrainLook }
+    >();
     for (const t of tiles) {
       const look = lookFor(t.baseTerrain, t.features);
-      const g = byDigi.get(look.digimap) ?? { specs: [], look };
+      const matKey = `${look.digimap}|${look.water ? "w" : ""}|${(look.gain ?? []).join(",")}`;
+      const g = byMat.get(matKey) ?? { specs: [], looks: [], look };
       g.specs.push(t);
-      byDigi.set(look.digimap, g);
+      g.looks.push(look);
+      byMat.set(matKey, g);
     }
 
-    for (const [digi, { specs, look }] of byDigi) {
+    for (const { specs, looks, look: matLook } of byMat.values()) {
       const hfByKey = new Map<string, HeightField | null>();
-      for (const s of specs) {
-        if (!hfByKey.has(s.key)) hfByKey.set(s.key, await this.resolveHf(look, s.key));
+      for (let si = 0; si < specs.length; si++) {
+        const s = specs[si]!;
+        if (!hfByKey.has(s.key)) {
+          hfByKey.set(s.key, await this.resolveHf(looks[si]!, s.key));
+        }
       }
       const tPer = 6 * divs * divs;
       const positions = new Float32Array(specs.length * tPer * 9);
@@ -894,7 +908,9 @@ export class Civ5TileKit {
       let u = 0;
       let cw = 0;
 
-      for (const s of specs) {
+      for (let si = 0; si < specs.length; si++) {
+        const s = specs[si]!;
+        const look = looks[si]!;
         const hf = hfByKey.get(s.key) ?? null;
         const cx = s.world.x;
         const cy = s.world.y;
@@ -950,18 +966,20 @@ export class Civ5TileKit {
       geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
       geo.computeVertexNormals();
 
-      const map = await this.digimap(digi);
-      const mat = look.water
+      const map = await this.digimap(matLook.digimap);
+      const mat = matLook.water
         ? new THREE.MeshLambertMaterial({
             map,
-            color: new THREE.Color(look.digimap.includes("shallow") ? 0x3a7a9a : 0x1e4a72),
+            color: new THREE.Color(
+              matLook.digimap.includes("shallow") ? 0x3a7a9a : 0x1e4a72,
+            ),
             transparent: true,
             opacity: 0.9,
           })
         : new THREE.MeshLambertMaterial({
             map,
             // calibrated per-terrain gain (see TerrainLook.gain)
-            color: new THREE.Color(...(look.gain ?? [1.05, 1.05, 1.05])),
+            color: new THREE.Color(...(matLook.gain ?? [1.05, 1.05, 1.05])),
             // baked hillshade lives in vertex colors
             vertexColors: true,
           });

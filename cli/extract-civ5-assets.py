@@ -60,23 +60,24 @@ WANT_TERRAIN_TEX = {
     "forest_tile4.dds",
 }
 
-# Piece heightmaps: (folder under terrain/pieces, Europe filename, out stem)
+# Piece heightmaps: (folder under terrain/pieces, Europe filename, out stem).
+# Only single-hex 128x128 pieces: "…01"/"…_1_2" are one hex; "…_2_x"/"…_3_x"
+# are 512x512 multi-hex cluster pieces our per-tile kit can't place.
 PIECE_HEIGHTS = [
     ("Grass", "Grass 01_H.dds", "grass_flat_h"),
     ("Grass Hill", "Grass_Hill_01_H.dds", "grass_hill_01_h"),
     ("Grass Hill", "Grass_Hill_02_H.dds", "grass_hill_02_h"),
-    ("Grass Hill", "Grass_Hill_2_1_H.dds", "grass_hill_21_h"),
     ("Plains", "Plains 01_H.dds", "plains_flat_h"),
-    ("Plains Hill", "Plains_Hill_01_H.dds", "plains_hill_01_h"),
+    ("Plains Hill", "Plains Hill 01_H.dds", "plains_hill_01_h"),
     ("Plains Hill", "Plains_Hill_02_H.dds", "plains_hill_02_h"),
     ("Desert", "Desert 01_H.dds", "desert_flat_h"),
-    ("Desert Hill", "Desert_Hill_01_H.dds", "desert_hill_01_h"),
-    ("Desert Hill", "Desert_Hill_02_H.dds", "desert_hill_02_h"),
+    ("Desert Hill", "Desert Hill 01_H.dds", "desert_hill_01_h"),
+    ("Desert Hill", "Euro_Desert_Hill_1_2_H.dds", "desert_hill_12_h"),
     ("Mountain", "Euro_Moun_1_1_H.dds", "mountain_11_h"),
     ("Mountain", "Euro_Moun_1_2_H.dds", "mountain_12_h"),
-    ("Mountain", "Euro_Moun_2_1_H.dds", "mountain_21_h"),
-    ("Tundra", "Tundra 01_H.dds", "tundra_flat_h"),
-    ("Tundra Hill", "Tundra_Hill_01_H.dds", "tundra_hill_01_h"),
+    ("Tundra", "Euro_Tundra 01_H.dds", "tundra_flat_h"),
+    ("Tundra Hill", "Euro_Tundra Hill 01_H.dds", "tundra_hill_01_h"),
+    ("Tundra Hill", "Euro_Tundra_Hill_1_2_H.dds", "tundra_hill_12_h"),
 ]
 
 
@@ -138,15 +139,19 @@ def parse_fpk(data: bytes, *, require_dds: bool = False) -> list[tuple[str, int,
 
 def decode_piece_height_r8(dds_path: Path, out_png: Path) -> None:
     """Piece *_H.dds format 36: each texel is R8 replicated across 8 bytes."""
-    payload = dds_path.read_bytes()[128:]
-    w = 128
-    n = w * w
+    data = dds_path.read_bytes()
+    h, w = struct.unpack_from("<II", data, 12)
+    if (w, h) != (128, 128):
+        # multi-hex cluster piece (512x512 2_x/3_x) — decoding it as a single
+        # tile yields a constant "flat" image, so refuse instead
+        print(f"  skip {dds_path.name}: {w}x{h} is not a single-hex piece")
+        return
+    payload = data[128:]
+    n = w * h
     if len(payload) < n * 8:
-        n = len(payload) // 8
-        w = int(n**0.5)
-        n = w * w
+        raise ValueError(f"{dds_path.name}: payload too small for {w}x{h} R8x8")
     vals = [payload[i * 8] for i in range(n)]
-    im = Image.new("L", (w, w))
+    im = Image.new("L", (w, h))
     im.putdata(vals)
     im.save(out_png)
     print(f"  H {out_png.name}: {min(vals)}–{max(vals)}")

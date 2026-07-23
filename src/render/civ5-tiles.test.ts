@@ -36,11 +36,7 @@ describe("civ5 tile kit: the four core land looks are pinned", () => {
   test("Grassland+Hill = SAME green digimap, hill relief pieces", () => {
     const look = lookFor("Grassland", ["Hill"]);
     expect(look.digimap).toBe("euro_grassland_d.png");
-    expect(look.heights).toEqual([
-      "grass_hill_01_h.png",
-      "grass_hill_02_h.png",
-      "grass_hill_21_h.png",
-    ]);
+    expect(look.heights).toEqual(["grass_hill_01_h.png", "grass_hill_02_h.png"]);
     expect(look.flat).toBe(false);
     expect(look.hScale).toBeGreaterThan(0.2); // must visibly read as a hill
   });
@@ -48,11 +44,7 @@ describe("civ5 tile kit: the four core land looks are pinned", () => {
   test("Plains+Hill = SAME brown digimap, hill relief pieces", () => {
     const look = lookFor("Plains", ["Hill"]);
     expect(look.digimap).toBe("euro_plain_d.png");
-    expect(look.heights).toEqual([
-      "plains_hill_01_h.png",
-      "plains_hill_02_h.png",
-      "plains_hill_21_h.png",
-    ]);
+    expect(look.heights).toEqual(["plains_hill_01_h.png", "plains_hill_02_h.png"]);
     expect(look.flat).toBe(false);
   });
 
@@ -132,5 +124,24 @@ describe("civ5 tile kit against the REAL turn-518 save", () => {
       if (!(await Bun.file(join(dir, f)).exists())) missing.push(f);
     }
     expect(missing).toEqual([]);
+  });
+
+  test("relief heightmaps are not constant-flat duds", async () => {
+    // A mis-decoded piece (e.g. a 512x512 multi-hex cluster read as 128x128)
+    // comes out as a constant image, which PNG-compresses to ~200 bytes and
+    // silently renders the tile flat. Real pieces are several KB.
+    const dir = join(import.meta.dir, "../../public/textures/civ5");
+    const files = new Set<string>();
+    for (const t of model.tiles) {
+      const look = lookFor(t.baseTerrain, t.features);
+      if (look.flat || look.water) continue;
+      for (const h of look.heights) files.add(h);
+    }
+    expect(files.size).toBeGreaterThan(0);
+    const duds: string[] = [];
+    for (const f of files) {
+      if (Bun.file(join(dir, f)).size < 1024) duds.push(f);
+    }
+    expect(duds).toEqual([]);
   });
 });
