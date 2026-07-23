@@ -12,6 +12,7 @@ import {
   hex2WorldCoords,
   NEIGHBOR_CLOCK_POSITIONS,
 } from "./hex/hex-math";
+import { MapCameraControls, syncCameraToUrl } from "./render/camera-controls";
 import { Civ5TileKit, type Civ5TileSpec } from "./render/civ5-tiles";
 import { attachHoverInspector } from "./render/hover-inspector";
 import { HexRayPicker } from "./render/tile-picker";
@@ -69,66 +70,37 @@ async function main(): Promise<void> {
     renderer.toneMappingExposure = 1.08;
     app.appendChild(renderer.domElement);
 
-    const camera = new THREE.PerspectiveCamera(22, innerWidth / innerHeight, 0.03, 100);
-    let target = new THREE.Vector2(0, 0);
-    // Slightly pulled back so the full tree stand reads as a mass
-    let distance = 4.6;
-    let tilt = 0.8;
-    const applyCam = () => {
-      camera.position.set(
-        target.x,
-        target.y - Math.sin(tilt) * distance,
-        Math.cos(tilt) * distance,
-      );
-      camera.up.set(0, 1, 0);
-      camera.lookAt(target.x, target.y, 0.15);
-    };
-    applyCam();
-
-    let dragging: "pan" | "tilt" | null = null;
-    let lastX = 0;
-    let lastY = 0;
-    const worldPerPixel = () => {
-      const h = 2 * distance * Math.tan((camera.fov * Math.PI) / 360);
-      return h / renderer.domElement.clientHeight;
-    };
-    renderer.domElement.addEventListener("pointerdown", (e) => {
-      dragging = e.button === 2 ? "tilt" : "pan";
-      lastX = e.clientX;
-      lastY = e.clientY;
-    });
-    window.addEventListener("pointermove", (e) => {
-      if (!dragging) return;
-      const dx = e.clientX - lastX;
-      const dy = e.clientY - lastY;
-      lastX = e.clientX;
-      lastY = e.clientY;
-      if (dragging === "pan") {
-        const s = worldPerPixel();
-        target.x -= dx * s;
-        target.y += dy * s * Math.cos(tilt);
-      } else {
-        tilt = Math.min(1.15, Math.max(0.25, tilt + dy * 0.005));
-      }
-      applyCam();
-    });
-    window.addEventListener("pointerup", () => {
-      dragging = null;
-    });
-    renderer.domElement.addEventListener(
-      "wheel",
-      (e) => {
-        e.preventDefault();
-        distance = Math.min(12, Math.max(0.7, distance * Math.exp(e.deltaY * 0.001)));
-        applyCam();
+    const controls = new MapCameraControls(
+      renderer.domElement,
+      innerWidth / innerHeight,
+      { x: 0, y: 0 },
+      4,
+      {
+        fov: 22,
+        near: 0.03,
+        far: 100,
+        tilt: 0.8,
+        // Slightly pulled back so the full tree stand reads as a mass
+        distance: 4.6,
+        minDistance: 0.7,
+        maxDistance: 12,
+        maxTilt: 1.15,
+        lookAtZ: 0.15,
       },
-      { passive: false },
     );
-    renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+    const q = new URLSearchParams(location.search);
+    if (q.has("x")) controls.target.x = Number(q.get("x"));
+    if (q.has("y")) controls.target.y = Number(q.get("y"));
+    if (q.has("dist")) controls.distance = Number(q.get("dist"));
+    if (q.has("tilt")) controls.tilt = Number(q.get("tilt"));
+    controls.apply();
+    syncCameraToUrl(controls);
+    const camera = controls.camera;
     window.addEventListener("resize", () => {
       renderer.setSize(innerWidth, innerHeight);
       camera.aspect = innerWidth / innerHeight;
       camera.updateProjectionMatrix();
+      controls.apply();
     });
 
     // hover tile inspector, picked against the kit's rendered surface heights

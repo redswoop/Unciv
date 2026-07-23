@@ -11,7 +11,7 @@ import type { GameInfo } from "./save/types";
 import type { Ruleset } from "./ruleset/ruleset";
 import { buildBoardModel } from "./render/board-model";
 import { buildScene } from "./render/scene";
-import { DIST_SCALE, MapCameraControls } from "./render/camera-controls";
+import { DIST_SCALE, MapCameraControls, syncCameraToUrl } from "./render/camera-controls";
 import { hexCornerVectors } from "./hex/hex-math";
 import { attachHoverInspector } from "./render/hover-inspector";
 import { TilePicker } from "./render/tile-picker";
@@ -104,6 +104,8 @@ export async function bootApp(opts: AppOptions): Promise<void> {
     }
     if (q.has("tilt")) controls.tilt = Number(q.get("tilt"));
     controls.apply();
+    // keep the URL mirroring the live framing so any view is reload/share-safe
+    syncCameraToUrl(controls, { legacyDist: true });
 
     // HUD
     hud.hidden = false;

@@ -14,6 +14,7 @@ import { loadSaveFromText } from "./save/load-save";
 import type { GameInfo } from "./save/types";
 import { posX, posY, tileFeatures } from "./save/types";
 import { hex2WorldCoords } from "./hex/hex-math";
+import { MapCameraControls, syncCameraToUrl } from "./render/camera-controls";
 import { Civ5TileKit, type Civ5TileSpec } from "./render/civ5-tiles";
 import { attachHoverInspector } from "./render/hover-inspector";
 import { HexRayPicker } from "./render/tile-picker";
@@ -156,65 +157,36 @@ async function main(): Promise<void> {
   renderer.toneMappingExposure = 1.12;
   app.appendChild(renderer.domElement);
 
-  const camera = new THREE.PerspectiveCamera(20, innerWidth / innerHeight, 0.05, 200);
-  let target = new THREE.Vector2(centerX, centerY);
-  let distance = span * 1.6;
-  let tilt = 0.92;
-  const applyCam = () => {
-    camera.position.set(
-      target.x,
-      target.y - Math.sin(tilt) * distance,
-      Math.cos(tilt) * distance,
-    );
-    camera.up.set(0, 1, 0);
-    camera.lookAt(target.x, target.y, 0.1);
-  };
-  applyCam();
-
-  let dragging: "pan" | "tilt" | null = null;
-  let lastX = 0;
-  let lastY = 0;
-  const wpp = () => {
-    const h = 2 * distance * Math.tan((camera.fov * Math.PI) / 360);
-    return h / renderer.domElement.clientHeight;
-  };
-  renderer.domElement.addEventListener("pointerdown", (e) => {
-    dragging = e.button === 2 ? "tilt" : "pan";
-    lastX = e.clientX;
-    lastY = e.clientY;
-  });
-  window.addEventListener("pointermove", (e) => {
-    if (!dragging) return;
-    const dx = e.clientX - lastX;
-    const dy = e.clientY - lastY;
-    lastX = e.clientX;
-    lastY = e.clientY;
-    if (dragging === "pan") {
-      const s = wpp();
-      target.x -= dx * s;
-      target.y += dy * s * Math.cos(tilt);
-    } else {
-      tilt = Math.min(1.15, Math.max(0.25, tilt + dy * 0.005));
-    }
-    applyCam();
-  });
-  window.addEventListener("pointerup", () => {
-    dragging = null;
-  });
-  renderer.domElement.addEventListener(
-    "wheel",
-    (e) => {
-      e.preventDefault();
-      distance = Math.min(span * 5, Math.max(0.9, distance * Math.exp(e.deltaY * 0.001)));
-      applyCam();
+  const controls = new MapCameraControls(
+    renderer.domElement,
+    innerWidth / innerHeight,
+    { x: centerX, y: centerY },
+    span,
+    {
+      fov: 20,
+      near: 0.05,
+      far: 200,
+      tilt: 0.92,
+      distance: span * 1.6,
+      minDistance: 0.9,
+      maxDistance: span * 5,
+      maxTilt: 1.15,
+      lookAtZ: 0.1,
     },
-    { passive: false },
   );
-  renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+  // camera framing via URL — camx/camy because ?x=&y= already mean chunk center
+  if (q.has("camx")) controls.target.x = Number(q.get("camx"));
+  if (q.has("camy")) controls.target.y = Number(q.get("camy"));
+  if (q.has("dist")) controls.distance = Number(q.get("dist"));
+  if (q.has("tilt")) controls.tilt = Number(q.get("tilt"));
+  controls.apply();
+  syncCameraToUrl(controls, { xKey: "camx", yKey: "camy" });
+  const camera = controls.camera;
   window.addEventListener("resize", () => {
     renderer.setSize(innerWidth, innerHeight);
     camera.aspect = innerWidth / innerHeight;
     camera.updateProjectionMatrix();
+    controls.apply();
   });
 
   // hover tile inspector, picked against the kit's rendered surface heights
