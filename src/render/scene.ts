@@ -380,7 +380,9 @@ export async function buildScene(
       height: t.height,
       cornerHeights: t.cornerHeights,
       clearBubble: t.resource !== undefined,
-      clearCenter: t.improvement !== undefined,
+      // center clearing: improvement pads AND on-terrain resource art both
+      // live mid-tile — Civ5 clears a patch in the woods for them
+      clearCenter: t.improvement !== undefined || t.resource !== undefined,
       suppressPiece: t.naturalWonder !== undefined,
     }));
     const terrain = await kit.buildTerrainMesh(specs, {

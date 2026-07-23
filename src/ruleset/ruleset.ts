@@ -166,7 +166,10 @@ export async function fetchRuleset(base: BaseRulesetName): Promise<Ruleset> {
   const entries = await Promise.all(
     (Object.entries(FILE_NAMES) as [keyof RulesetFileText, string][]).map(
       async ([key, file]) => {
-        const res = await fetch(`rulesets/${encodeURIComponent(base)}/${file}`).catch(() => null);
+        // encodeURI, not encodeURIComponent: the dev static server (sirv)
+        // serves "Gods & Kings" with a literal &, but %26 falls through to
+        // the SPA HTML fallback — which then explodes in parseGdxJson
+        const res = await fetch(encodeURI(`rulesets/${base}/${file}`)).catch(() => null);
         if (!res?.ok) {
           if (OPTIONAL_FILES.has(key)) return [key, undefined] as const;
           throw new Error(`Failed to fetch ruleset file ${base}/${file}: ${res?.status}`);

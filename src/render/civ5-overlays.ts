@@ -119,7 +119,7 @@ function buildDecalMesh(
   spots: DecalSpot[],
   tex: THREE.Texture,
   groundZ: GroundZ,
-  opts: { lift?: number; opacity?: number; renderOrder?: number } = {},
+  opts: { lift?: number; opacity?: number; renderOrder?: number; fixedZ?: number } = {},
 ): THREE.Mesh {
   const divs = 3;
   const lift = opts.lift ?? 0.012;
@@ -137,7 +137,7 @@ function buildDecalMesh(
       const qy = (j / divs) * 2 * s.r - s.r;
       const lx = s.ox + qx * cos - qy * sin;
       const ly = s.oy + qx * sin + qy * cos;
-      const z = groundZ(s.tile, lx, ly) + lift;
+      const z = opts.fixedZ !== undefined ? opts.fixedZ : groundZ(s.tile, lx, ly) + lift;
       return [s.tile.world.x + lx, s.tile.world.y + ly, z, i / divs, j / divs];
     };
     for (let i = 0; i < divs; i++) {
@@ -447,13 +447,16 @@ export async function buildNaturalWonderArt(
       CIV5.naturalWonders[t.naturalWonder!] ?? CIV5.naturalWonders["*"]!;
     const tex = await loadTex(CIV5.svRoot + spec.file);
     if (!tex) continue;
+    const isWater =
+      t.baseTerrain === "Coast" || t.baseTerrain === "Ocean" || t.baseTerrain === "Lakes";
     if (spec.mode === "decal") {
       group.add(
         buildDecalMesh(
           [{ tile: t, ox: 0, oy: 0, r: spec.scale * 0.5, rot: 0 }],
           tex,
           groundZ,
-          { renderOrder: 3, lift: 0.012 },
+          // sea wonders (Great Barrier Reef) float on the surface, not the seabed
+          { renderOrder: 3, lift: 0.012, fixedZ: isWater ? 0.012 : undefined },
         ),
       );
     } else {
@@ -473,6 +476,8 @@ export async function buildNaturalWonderArt(
         groundZ(t, 0.35, 0),
         groundZ(t, -0.35, 0),
         groundZ(t, 0, -0.35),
+        // island wonders (Krakatoa) rise from the waterline, not the seabed
+        isWater ? 0 : -Infinity,
       );
       sprite.position.set(t.world.x, t.world.y, z + 0.04);
       sprite.scale.set(spec.scale, spec.scale, 1);

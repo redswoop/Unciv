@@ -1555,7 +1555,19 @@ ${
   float foamN1 = texture2D(bumpsTex, vWaterUv * 1.7 + vec2(uTime * 0.010, uTime * 0.006)).g;
   float foamN2 = texture2D(bumpsTex, vWaterUv * 3.1 - vec2(uTime * 0.007, uTime * 0.011)).g;
   float foamEdge = 1.0 - smoothstep(0.0, 0.035, vDepth);
-  float foam = foamEdge * smoothstep(0.35, 0.7, 0.5 * (foamN1 + foamN2) + foamEdge * 0.5);`
+  float foam = foamEdge * smoothstep(0.35, 0.7, 0.5 * (foamN1 + foamN2) + foamEdge * 0.5);
+  // slow swell bands: broad low-freq brightness drift so open water breathes
+  // (low frequency on purpose — high-freq minified bumps alias into speckle)
+  float swell1 = texture2D(bumpsTex, vWaterUv * 0.13 + vec2(uTime * 0.004, -uTime * 0.003)).g;
+  float swell2 = texture2D(bumpsTex, vWaterUv * 0.27 - vec2(uTime * 0.006, uTime * 0.002)).g;
+  lutC.rgb *= 0.95 + 0.10 * (swell1 * 0.6 + swell2 * 0.4);
+  // drifting sun-glint patches over open water
+  float glint = smoothstep(0.68, 0.86, swell1 * 0.45 + swell2 * 0.55);
+  lutC.rgb += glint * vec3(0.07, 0.09, 0.10) * smoothstep(0.12, 0.5, relD);
+  // sparse whitecap flecks on the deep ocean, blinking through the swell
+  float capN = texture2D(bumpsTex, vWaterUv * 0.8 + vec2(uTime * 0.014, uTime * 0.010)).g;
+  float cap = smoothstep(0.86, 0.95, capN * 0.7 + swell2 * 0.3) * smoothstep(0.45, 0.8, relD);
+  lutC.rgb = mix(lutC.rgb, vec3(0.85, 0.92, 0.95), cap * 0.4);`
     : "  float foam = 0.0;"
 }
   diffuseColor = vec4(mix(lutC.rgb, vec3(0.94, 0.97, 0.98), foam), max(waterA, foam * 0.9));`,

@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Civ5-look — art galleries</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #0b1626; overflow: hidden; }
+      #app { position: fixed; inset: 0; }
+      #app canvas { display: block; }
+      #hud {
+        position: fixed; top: 12px; left: 12px; z-index: 10;
+        background: rgba(10, 18, 32, 0.88); color: #e8e4d8;
+        font: 13px/1.5 Georgia, serif; padding: 12px 16px; border-radius: 8px;
+        max-width: 380px;
+      }
+      #hud h1 { font-size: 16px; margin: 0 0 4px; color: #f3ead2; }
+      #hud a { color: #7db3e8; text-decoration: none; margin-right: 10px; }
+      #hud a.active { color: #f3c14b; font-weight: bold; }
+      #status { color: #9fb0c8; }
+      #site-nav { margin-top: 6px; border-top: 1px solid #33415c; padding-top: 6px; }
+      #site-nav a { color: #7db3e8; text-decoration: none; margin-right: 10px; }
+      #site-nav .nav-title { color: #6c7a94; font-size: 10px; letter-spacing: 0.12em; }
+    </style>
+  </head>
+  <body>
+    <div id="app" data-render-state="loading"></div>
+    <div id="hud">
+      <h1 id="hud-title">Galleries</h1>
+      <div id="modes"></div>
+      <div id="status"></div>
+      <div id="site-nav"></div>
+    </div>
+    <script type="module" src="/src/gallery-main.ts"></script>
+  </body>
+</html>

@@ -28,8 +28,23 @@ export const SITE_NAV: SiteNavLink[] = [
   },
   {
     href: "/chunk.html?mode=gallery",
-    label: "gallery",
+    label: "terrain",
     active: (path, search) => isChunk(path) && mode(search) === "gallery",
+  },
+  {
+    href: "/gallery.html?mode=resources",
+    label: "resources",
+    active: (path, search) => path.includes("gallery.html") && mode(search) !== "cities" && mode(search) !== "wonders" && mode(search) !== "improvements",
+  },
+  {
+    href: "/gallery.html?mode=cities",
+    label: "cities",
+    active: (path, search) => path.includes("gallery.html") && mode(search) === "cities",
+  },
+  {
+    href: "/gallery.html?mode=wonders",
+    label: "wonders",
+    active: (path, search) => path.includes("gallery.html") && mode(search) === "wonders",
   },
   // chunk presets below are landmarks of the aztec-turn0 reference world
   {
