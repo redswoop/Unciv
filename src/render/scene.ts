@@ -14,7 +14,7 @@
  */
 
 import * as THREE from "three";
-import { hexCornerVectors, type Vec2 } from "../hex/hex-math";
+import { hexCornerVectors, roundHexCoords, world2HexCoords, type Vec2 } from "../hex/hex-math";
 import {
   heightAtLocal,
   type BoardModel,
@@ -38,6 +38,7 @@ import {
   type OverlayTile,
 } from "./civ5-overlays";
 import { buildResourceTerrainArt } from "./resource-terrain";
+import { buildRiverLayer } from "./river-mesh";
 import assetMap from "./asset-map.json";
 
 /**
@@ -364,6 +365,8 @@ export async function buildScene(
   let overlayGroundZ: GroundZ | null = null;
   let overlayTiles: OverlayTile[] = [];
   let overlayArt = false;
+  /** shader clocks driven once per frame from BuiltScene.update */
+  const timeUniforms: { value: number }[] = [];
   if (useCiv5) {
     const kit = new Civ5TileKit();
     await kit.init();
@@ -451,10 +454,35 @@ export async function buildScene(
 
   // ——— rivers ———
   if (model.rivers.length > 0) {
-    const geo = segmentQuadGeometry(model.rivers, assetMap.rivers.width, LIFT * 2.4);
-    scene.add(
-      new THREE.Mesh(geo, flatMaterial({ color: new THREE.Color(assetMap.rivers.color) })),
-    );
+    if (useCiv5 && overlayGroundZ) {
+      // smoothed, animated ribbons draped on the rendered terrain
+      const overlayByKey = new Map(overlayTiles.map((t) => [t.key, t]));
+      const worldZ = (x: number, y: number): number => {
+        const hex = roundHexCoords(world2HexCoords({ x, y }));
+        const ot = overlayByKey.get(`${hex.x},${hex.y}`);
+        return ot ? overlayGroundZ!(ot, x - ot.world.x, y - ot.world.y) : 0;
+      };
+      const bumps = await new Promise<THREE.Texture | null>((resolve) => {
+        new THREE.TextureLoader().load(
+          resolveTexture("").startsWith("data:") ? "" : "textures/civ5/waterbumps.png",
+          (t) => {
+            t.wrapS = t.wrapT = THREE.RepeatWrapping;
+            t.colorSpace = THREE.NoColorSpace;
+            resolve(t);
+          },
+          undefined,
+          () => resolve(null),
+        );
+      });
+      const riverLayer = buildRiverLayer(model.rivers, worldZ, bumps);
+      scene.add(riverLayer.group);
+      timeUniforms.push(...riverLayer.timeUniforms);
+    } else {
+      const geo = segmentQuadGeometry(model.rivers, assetMap.rivers.width, LIFT * 2.4);
+      scene.add(
+        new THREE.Mesh(geo, flatMaterial({ color: new THREE.Color(assetMap.rivers.color) })),
+      );
+    }
   }
 
   // ——— roads ———
@@ -510,7 +538,6 @@ export async function buildScene(
   // ——— on-map Civ5 art: resource icon layer, improvement decals, wonder art,
   //     and the actual on-terrain resource art (herds, crops, outcrops, fish) ———
   let bubbleLayer: BubbleLayer | null = null;
-  const timeUniforms: { value: number }[] = [];
   if (overlayArt && overlayGroundZ) {
     const [res, impDecals, wonders, terrainArt] = await Promise.all([
       buildResourceBubbles(overlayTiles, overlayGroundZ),
