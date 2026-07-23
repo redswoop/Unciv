@@ -54,8 +54,12 @@ export class MapCameraControls {
     this.target = new THREE.Vector2(center.x, center.y);
     // default: most of the map in frame, same visual coverage as old FOV45 * 1.35
     this.distance = boardRadius * 1.35 * DIST_SCALE;
-    this.minDistance = 3.5 * DIST_SCALE;
+    // Allow close inspection of a single hex / tree stand (was 3.5× ~ too far)
+    this.minDistance = 0.85 * DIST_SCALE;
     this.maxDistance = boardRadius * 3.2 * DIST_SCALE;
+    // near plane must stay under minDistance * cos(max tilt) so close zoom doesn't clip
+    this.camera.near = 0.05;
+    this.camera.updateProjectionMatrix();
     this.apply();
 
     dom.addEventListener("pointerdown", this.onPointerDown);

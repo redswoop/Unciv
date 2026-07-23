@@ -13,6 +13,7 @@ import { buildBoardModel } from "./render/board-model";
 import { buildScene } from "./render/scene";
 import { DIST_SCALE, MapCameraControls } from "./render/camera-controls";
 import { hexCornerVectors } from "./hex/hex-math";
+import { mountSiteNav } from "./ui/site-nav";
 
 export interface AppOptions {
   /** Raw text of the save to load on boot (wire format, not parsed). */
@@ -104,6 +105,7 @@ export async function bootApp(opts: AppOptions): Promise<void> {
           `<span><span class="sw" style="background: rgb(${colors.outer.join(",")})"></span>${name}</span>`,
       )
       .join("");
+    mountSiteNav();
     if (ruleset.unresolved.size > 0) {
       console.warn("Unresolved ruleset names:", [...ruleset.unresolved]);
     }

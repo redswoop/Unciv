@@ -357,8 +357,14 @@ export async function buildScene(
       baseTerrain: t.baseTerrain,
       features: t.features,
       key: t.key,
+      // welded low-freq relief so hills/mountains merge; piece heights add detail
+      height: t.height,
+      cornerHeights: t.cornerHeights,
     }));
-    const terrain = await kit.buildTerrainMesh(specs, { divs: TILE_DIVS_FULLMAP });
+    const terrain = await kit.buildTerrainMesh(specs, {
+      divs: TILE_DIVS_FULLMAP,
+      foliage: "full",
+    });
     scene.add(terrain);
   } else {
     // Artful / procedural fallback (embedded build, or pre-extract)

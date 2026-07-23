@@ -15,6 +15,7 @@ import type { GameInfo } from "./save/types";
 import { posX, posY, tileFeatures } from "./save/types";
 import { hex2WorldCoords } from "./hex/hex-math";
 import { Civ5TileKit, type Civ5TileSpec } from "./render/civ5-tiles";
+import { mountSiteNav } from "./ui/site-nav";
 
 const SAVE_URL = "saves/turn518-14civs.unciv";
 
@@ -111,14 +112,17 @@ async function main(): Promise<void> {
   const hudSub = document.getElementById("hud-sub");
   if (hudTitle) hudTitle.textContent = title;
   if (hudSub)
-    hudSub.textContent = `${tiles.length} tiles · digimaps + piece heightmaps · forest billboards`;
+    hudSub.textContent = `${tiles.length} tiles · digimaps + piece heights · dense foliage`;
+  mountSiteNav();
 
   status("Building meshes…");
-  const terrain = await kit.buildTerrainMesh(tiles);
+  const terrain = await kit.buildTerrainMesh(tiles, { foliage: "detail" });
 
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(0x5a7a92);
-  scene.fog = new THREE.Fog(0x6a8aa0, 28, 70);
+  // Fog kept distant + desaturated: real Civ5 stays warm at play zoom
+  // (frame-capture comparison); blue fog at 28u was washing all foliage.
+  scene.fog = new THREE.Fog(0x8fa0ac, 55, 140);
   scene.add(new THREE.AmbientLight(0xc8d4e0, 0.28));
   scene.add(new THREE.HemisphereLight(0xb8d0f0, 0x5a4a30, 0.48));
   const sun = new THREE.DirectionalLight(0xfff0d0, 1.55);
@@ -149,7 +153,7 @@ async function main(): Promise<void> {
   renderer.toneMappingExposure = 1.12;
   app.appendChild(renderer.domElement);
 
-  const camera = new THREE.PerspectiveCamera(20, innerWidth / innerHeight, 0.1, 200);
+  const camera = new THREE.PerspectiveCamera(20, innerWidth / innerHeight, 0.05, 200);
   let target = new THREE.Vector2(centerX, centerY);
   let distance = span * 1.6;
   let tilt = 0.92;
@@ -198,7 +202,7 @@ async function main(): Promise<void> {
     "wheel",
     (e) => {
       e.preventDefault();
-      distance = Math.min(span * 5, Math.max(3, distance * Math.exp(e.deltaY * 0.001)));
+      distance = Math.min(span * 5, Math.max(0.9, distance * Math.exp(e.deltaY * 0.001)));
       applyCam();
     },
     { passive: false },

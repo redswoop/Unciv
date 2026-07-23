@@ -76,9 +76,10 @@ Chunk/hero demos: `/chunk.html`, `/hero.html`. Remaining gaps:
 1. **City banners are world-scaled sprites** — monstrous when zoomed in,
    overlapping when zoomed out. Fix: screen-space size cap (scale sprites by
    distance in the render loop), fade/cluster at far zoom. `scene.ts` cities section.
-2. **Feature overlays are procedural blobs** (forest/jungle/hill blotches).
-   Civ5 uses 3D tree/jungle models. Middle ground: sprite scatter (billboard
-   tree clumps per forest tile, 3-5 quads) beats the blob texture immediately.
+2. **Foliage polish** — forests follow extracted `docs/civ5-forests.xml`
+   (360 trees/tile, 4 masks, space_between, overlay α0.6), LOD-scaled
+   (hero/detail/full). Still billboard atlas not 3D GR2; atlas res + true
+   360 density on full map are remaining knobs.
 3. **Railroads/roads are chunky flat quads** — the dark crisscross reads as
    scribbles. Thinner width, dashed ties for rail, and route through edge
    midpoints (curve via city/tile centers) would read far better.

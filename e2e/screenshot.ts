@@ -10,8 +10,14 @@ import { chromium } from "playwright-core";
 const url = process.argv[2] ?? "http://127.0.0.1:5199/";
 const out = process.argv[3] ?? "/tmp/civ5look.png";
 
+const chromeCandidates = [
+  process.env.PW_CHROME,
+  "/opt/pw-browsers/chromium",
+  `${process.env.HOME}/Library/Caches/ms-playwright/chromium-1217/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`,
+].filter(Boolean) as string[];
+
 const browser = await chromium.launch({
-  executablePath: "/opt/pw-browsers/chromium",
+  executablePath: chromeCandidates[0],
   headless: true,
   args: ["--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader"],
 });

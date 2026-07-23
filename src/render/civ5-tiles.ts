@@ -2,23 +2,60 @@
  * Firaxis-style tile rendering kit.
  *
  * Each base terrain maps to a digimap (world-UV) + optional piece heightmap
- * (local-UV displacement). Forests/jungles get billboard scatters from the
- * Civ5 tree atlas. Assets live in public/textures/civ5/ (extracted, gitignored).
+ * (local-UV displacement). When board-model heights are supplied, welded
+ * low-freq relief is the base and piece heightmaps add hill/mountain detail.
+ *
+ * Forests follow extracted forests.xml (TerrainModels.fpk):
+ *   num_tiles=4, random_trees_per_tile=360, space_between=1.33, overlay_alpha=0.60
+ * Placement is mask-driven (forest_tile1..4) + Poisson spacing; density is
+ * LOD-scaled for full-map performance.
+ *
+ * Assets live in public/textures/civ5/ (extracted, gitignored).
  */
 
 import * as THREE from "three";
 import { hexCornerVectors, type Vec2 } from "../hex/hex-math";
+import { heightAtLocal } from "./board-model";
 
 const ROOT = "textures/civ5/";
 const H_BASE = 60;
-/** World digimap repeat scale (world units → UV). */
-export const DIGIMAP_UV = 0.22;
+/**
+ * World digimap repeat scale (world units → UV).
+ * ~0.16 → one digimap period spans ~6 world units ≈ 3.5 hex spacings —
+ * closer to Civ5's continuous ground paint than the old 0.22 (too busy/muddy).
+ */
+export const DIGIMAP_UV = 0.16;
 /** Default subdivisions per hex sector (chunk/hero). Full map uses a lower value. */
 export const TILE_DIVS = 20;
 /** Full-map density: 8 → ~384 tris/tile × 10k ≈ 4M tris, fine for WebGL. */
 export const TILE_DIVS_FULLMAP = 8;
-/** Slight overlap seals AA cracks between digimap groups. */
-const OVERLAP = 1.02;
+/** Slight overlap seals AA cracks between digimap groups (keep tiny — big values misalign). */
+const OVERLAP = 1.004;
+/** Flat land rests here so piece-height rims meet neighbours. */
+const FLAT_Z = 0.02;
+
+/**
+ * From docs/civ5-forests.xml (TerrainModels.fpk).
+ * space_between is for a tree of size 1 in Firaxis units; we rescale to our
+ * hex (circumradius 1) so ~hundreds of trees can pack the mask.
+ */
+const FOREST_CFG = {
+  numTiles: 4,
+  /** full Civ5 density — hero approaches this; full map uses a fraction */
+  randomTreesPerTile: 360,
+  overlayAlpha: 0.6,
+  /** Firaxis space_between for size-1 tree */
+  spaceBetween: 1.33,
+} as const;
+
+/** Convert Firaxis size-1 spacing into our world units for a given tree scale. */
+function forestMinDist(treeScale: number): number {
+  // forests.xml space_between=1.33 for size-1. Their hex world units are larger
+  // than ours (circumradius 1); keep packs dense enough to hit ~360/tile.
+  // Smaller trees pack tighter (Firaxis comment).
+  const unit = 0.28 * FOREST_CFG.spaceBetween * treeScale;
+  return Math.max(0.035, unit);
+}
 
 /** True if Firaxis digimaps have been extracted to public/textures/civ5/. */
 export async function civ5AssetsAvailable(): Promise<boolean> {
@@ -36,7 +73,14 @@ export interface Civ5TileSpec {
   features: string[];
   /** stable hash input for variant pick */
   key: string;
+  /** board-model center height (welded low-freq relief) */
+  height?: number;
+  /** board-model corner heights — when set, terrain uses welded base + piece detail */
+  cornerHeights?: [number, number, number, number, number, number];
 }
+
+/** full = whole map (lighter); detail = chunk; hero = single-tile showcase density */
+export type FoliageQuality = "full" | "detail" | "hero";
 
 interface TerrainLook {
   digimap: string;
@@ -53,37 +97,37 @@ const LOOKS: Record<string, TerrainLook> = {
   Grassland: {
     digimap: "euro_grassland_d.png",
     heights: ["grass_flat_h.png"],
-    hScale: 0.05,
+    hScale: 0.06,
     flat: true,
   },
   Plains: {
     digimap: "euro_plain_d.png",
     heights: ["plains_flat_h.png"],
-    hScale: 0.05,
+    hScale: 0.06,
     flat: true,
   },
   Desert: {
     digimap: "euro_desert_d.png",
     heights: ["desert_flat_h.png"],
-    hScale: 0.06,
+    hScale: 0.07,
     flat: true,
   },
   Tundra: {
     digimap: "euro_tundra_d.png",
     heights: ["tundra_flat_h.png"],
-    hScale: 0.06,
+    hScale: 0.07,
     flat: true,
   },
   Snow: {
     digimap: "generic_snow_d.png",
-    heights: ["generic_snow_h.png"], // digimap-sized; may fail → flat
-    hScale: 0.08,
+    heights: ["generic_snow_h.png"],
+    hScale: 0.09,
     flat: true,
   },
   Mountain: {
     digimap: "euro_mountain_base_d.png",
-    heights: ["mountain_11_h.png", "mountain_12_h.png"],
-    hScale: 0.85,
+    heights: ["mountain_11_h.png", "mountain_12_h.png", "mountain_21_h.png"],
+    hScale: 0.88,
     flat: false,
   },
   Coast: {
@@ -110,20 +154,19 @@ const LOOKS: Record<string, TerrainLook> = {
   Marsh: {
     digimap: "marsh_d.png",
     heights: [],
-    hScale: 0.04,
+    hScale: 0.05,
     flat: true,
   },
-  // Unciv extras → nearest digimap
   "Flood plains": {
     digimap: "euro_plain_d.png",
     heights: [],
-    hScale: 0.04,
+    hScale: 0.05,
     flat: true,
   },
   Ice: {
     digimap: "generic_snow_d.png",
     heights: [],
-    hScale: 0.03,
+    hScale: 0.04,
     flat: true,
   },
   Atoll: {
@@ -136,7 +179,7 @@ const LOOKS: Record<string, TerrainLook> = {
 };
 
 const HILL_HEIGHTS: Record<string, string[]> = {
-  Grassland: ["grass_hill_01_h.png", "grass_hill_02_h.png"],
+  Grassland: ["grass_hill_01_h.png", "grass_hill_02_h.png", "grass_hill_21_h.png"],
   Plains: ["plains_hill_01_h.png", "plains_hill_02_h.png", "plains_hill_21_h.png"],
   Desert: ["desert_hill_01_h.png", "desert_hill_12_h.png"],
   Tundra: ["tundra_hill_01_h.png"],
@@ -149,6 +192,11 @@ function hashKey(s: string): number {
   return h >>> 0;
 }
 
+/** Deterministic [0,1) from key + salt. */
+function hash01(key: string, salt: number): number {
+  return (hashKey(`${key}|${salt}`) >>> 0) / 0x100000000;
+}
+
 function lookFor(base: string, features: string[]): TerrainLook {
   const baseLook = LOOKS[base] ?? LOOKS.Plains!;
   const hasHill = features.includes("Hill");
@@ -157,7 +205,8 @@ function lookFor(base: string, features: string[]): TerrainLook {
     return {
       digimap: baseLook.digimap,
       heights,
-      hScale: 0.42,
+      // broad rolling hill, not a tent spike
+      hScale: 0.48,
       flat: false,
     };
   }
@@ -220,75 +269,120 @@ export interface HeightField {
   flat: boolean;
 }
 
+/** Tiny deterministic micro-relief so flat digimap land isn't a plastic sheet. */
+function microRelief(lx: number, ly: number): number {
+  // cheap value-noise-ish from coordinates
+  const n1 = Math.sin(lx * 7.1 + ly * 5.3) * Math.cos(lx * 3.7 - ly * 6.2);
+  const n2 = Math.sin(lx * 13.0 - ly * 11.0) * 0.35;
+  return (n1 + n2) * 0.012;
+}
+
+/**
+ * Sample piece heightmap in local hex space. Rim soft-falls to FLAT_Z so
+ * adjacent tiles meet without cliffs. Flat pieces get subtle micro-relief.
+ */
 export function sampleHeight(hf: HeightField | null, lx: number, ly: number): number {
-  if (!hf || hf.flat) return 0.035;
+  if (!hf || hf.flat) return FLAT_Z + microRelief(lx, ly);
   const [u, v] = localToUV(lx, ly);
   const raw = sampleR8(hf.data, hf.w, hf.h, u, v);
   // constant-196 flat sentinels (flat piece maps)
-  if (raw > 180) return 0.035;
+  if (raw > 180) return FLAT_Z + microRelief(lx, ly);
   let z = (Math.max(0, raw - H_BASE) / (255 - H_BASE)) * hf.hScale;
-  // soft falloff near hex rim so neighbours meet without cliffs
-  const r = Math.hypot(lx, ly); // circumradius 1 at corners
-  if (r > 0.72) {
-    const t = Math.min(1, (r - 0.72) / 0.28);
+  const r = Math.hypot(lx, ly);
+  // start falloff earlier so hills blend into neighbours instead of mesa edges
+  if (r > 0.58) {
+    const t = Math.min(1, (r - 0.58) / 0.42);
     const s = t * t * (3 - 2 * t);
-    z = z * (1 - s) + 0.035 * s;
+    z = z * (1 - s) + (FLAT_Z + microRelief(lx, ly) * 0.3) * s;
   }
   return z;
 }
 
 /**
- * Crop forest/jungle atlas cells into transparent tree textures.
- * Civ5's forest_europe sheet is olive-green with trees; corners are often
- * already a=0. We (1) honor source alpha, (2) chroma-key residual sheet green,
- * (3) reject cells that are still mostly solid rectangles (the floating
- * green squares bug).
+ * Final terrain Z for a local offset inside a tile.
+ * Prefer welded board-model base when present; piece height adds hill/mountain form.
  */
-export function cropAtlasFrames(img: HTMLImageElement): THREE.Texture[] {
+export function terrainHeightAt(
+  s: Civ5TileSpec,
+  look: TerrainLook,
+  hf: HeightField | null,
+  corners: readonly Vec2[],
+  lx: number,
+  ly: number,
+): number {
+  const piece = sampleHeight(hf, lx, ly);
+  if (s.cornerHeights && s.height !== undefined) {
+    const base = heightAtLocal(s.height, s.cornerHeights, corners, { x: lx, y: ly });
+    if (look.water) return 0;
+    if (look.flat) {
+      // micro-relief: tiny piece/noise already baked into board height
+      return base;
+    }
+    // Firaxis hill/mountain shape as high-freq detail on welded base
+    const detail = piece - FLAT_Z;
+    return base + detail * 0.55;
+  }
+  return look.water ? 0 : piece;
+}
+
+export type AtlasCropMode = "forest" | "jungle";
+
+/**
+ * Crop forest/jungle atlas cells into round-ish canopy cards.
+ * Forest sheet is olive (~57,71,41); jungle sheet is near-black. Jungle
+ * foliage is also dark green — must NOT use the olive sheet key on jungle
+ * or we flood-delete the palms into black sticks.
+ */
+export function cropAtlasFrames(
+  img: HTMLImageElement,
+  mode: AtlasCropMode = "forest",
+): THREE.Texture[] {
   const cols = 4;
   const rows = 4;
   const fw = Math.floor(img.width / cols);
   const fh = Math.floor(img.height / rows);
   const frames: THREE.Texture[] = [];
 
-  /** Olive sheet key used by Civ5 forest/jungle atlases. */
   const isSheetRgb = (r: number, g: number, b: number) => {
-    // tight match to (57,71,41) and near-neighbors
+    if (mode === "jungle") {
+      // jungle sheet ≈ (16,14,16); foliage is darker greens with more chroma
+      const maxc = Math.max(r, g, b);
+      const minc = Math.min(r, g, b);
+      if (maxc < 28) return true; // near-black sheet
+      // flat near-grey dark fill
+      return maxc < 40 && maxc - minc < 8;
+    }
     const dr = r - 57;
     const dg = g - 71;
     const db = b - 41;
-    if (dr * dr + dg * dg + db * db < 900) return true;
-    // flat low-saturation greens typical of the sheet fill
+    if (dr * dr + dg * dg + db * db < 400) return true;
     const maxc = Math.max(r, g, b);
     const minc = Math.min(r, g, b);
-    return g > 45 && g < 120 && g >= r && g >= b && maxc - minc < 45 && r < 100 && b < 90;
+    if (maxc < 22) return true;
+    return g > 52 && g < 88 && Math.abs(g - 71) < 14 && maxc - minc < 22 && r < 75 && b < 55;
   };
 
   for (let row = 0; row < rows; row++) {
     for (let col = 0; col < cols; col++) {
-      const canvas = document.createElement("canvas");
-      canvas.width = fw;
-      canvas.height = fh;
-      const ctx = canvas.getContext("2d")!;
-      ctx.clearRect(0, 0, fw, fh);
-      ctx.drawImage(img, col * fw, row * fh, fw, fh, 0, 0, fw, fh);
-      const id = ctx.getImageData(0, 0, fw, fh);
+      const src = document.createElement("canvas");
+      src.width = fw;
+      src.height = fh;
+      const sctx = src.getContext("2d")!;
+      sctx.clearRect(0, 0, fw, fh);
+      sctx.drawImage(img, col * fw, row * fh, fw, fh, 0, 0, fw, fh);
+      const id = sctx.getImageData(0, 0, fw, fh);
       const d = id.data;
       const N = fw * fh;
 
-      // Pass 1: anything already transparent or sheet-colored → a=0
+      // Pass 1: low alpha → clear (keep semi-opaque foliage — no shredding)
       for (let i = 0; i < N; i++) {
         const o = i * 4;
-        const r = d[o]!;
-        const g = d[o + 1]!;
-        const b = d[o + 2]!;
-        const a = d[o + 3]!;
-        if (a < 12 || isSheetRgb(r, g, b)) {
-          d[o + 3] = 0;
+        if (d[o + 3]! < 12) {
+          d[o] = d[o + 1] = d[o + 2] = d[o + 3] = 0;
         }
       }
 
-      // Pass 2: flood-fill residual sheet from borders (catches near-key greens)
+      // Pass 2: flood sheet from borders only
       const seen = new Uint8Array(N);
       const q: number[] = [];
       const tryPush = (x: number, y: number) => {
@@ -296,7 +390,6 @@ export function cropAtlasFrames(img: HTMLImageElement): THREE.Texture[] {
         const i = y * fw + x;
         if (seen[i]) return;
         const o = i * 4;
-        // already clear
         if (d[o + 3]! < 12) {
           seen[i] = 1;
           q.push(i);
@@ -316,7 +409,7 @@ export function cropAtlasFrames(img: HTMLImageElement): THREE.Texture[] {
       }
       while (q.length) {
         const i = q.pop()!;
-        d[i * 4 + 3] = 0;
+        d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = d[i * 4 + 3] = 0;
         const x = i % fw;
         const y = (i / fw) | 0;
         tryPush(x + 1, y);
@@ -325,14 +418,64 @@ export function cropAtlasFrames(img: HTMLImageElement): THREE.Texture[] {
         tryPush(x, y - 1);
       }
 
-      // Stats: opaque pixel count + bounding box fill ratio
+      // Mild alpha boost on midtones so crowns read solid (less “broken”)
+      // Jungle: heavy fill so palm fronds melt into canopy blobs
+      const alphaBoost = mode === "jungle" ? 90 : 40;
+      for (let i = 0; i < N; i++) {
+        const o = i * 4;
+        const a = d[o + 3]!;
+        if (a > 0 && a < 230) d[o + 3] = Math.min(255, a + alphaBoost);
+      }
+
+      // Dilate: jungle 2 passes (frondy palms → soft canopy discs),
+      // forest 1 pass (rounds the ragged crown silhouette — the dark
+      // calibrated tint made frayed card edges read as spiky cutouts)
+      {
+        const passes = mode === "jungle" ? 2 : 1;
+        for (let pass = 0; pass < passes; pass++) {
+          const copy = new Uint8ClampedArray(d);
+          for (let y = 1; y < fh - 1; y++) {
+            for (let x = 1; x < fw - 1; x++) {
+              const i = y * fw + x;
+              if (copy[i * 4 + 3]! >= 50) continue;
+              let best = -1;
+              let bestA = 0;
+              for (const [dx, dy] of [
+                [1, 0],
+                [-1, 0],
+                [0, 1],
+                [0, -1],
+                [1, 1],
+                [-1, -1],
+                [1, -1],
+                [-1, 1],
+              ] as const) {
+                const j = (y + dy) * fw + (x + dx);
+                const a = copy[j * 4 + 3]!;
+                if (a > bestA) {
+                  bestA = a;
+                  best = j;
+                }
+              }
+              if (best >= 0 && bestA > 60) {
+                const o = i * 4;
+                d[o] = copy[best * 4]!;
+                d[o + 1] = copy[best * 4 + 1]!;
+                d[o + 2] = copy[best * 4 + 2]!;
+                d[o + 3] = Math.min(220, bestA - 10);
+              }
+            }
+          }
+        }
+      }
+
       let opaque = 0;
       let minX = fw;
       let minY = fh;
       let maxX = 0;
       let maxY = 0;
       for (let i = 0; i < N; i++) {
-        if (d[i * 4 + 3]! < 20) continue;
+        if (d[i * 4 + 3]! < 16) continue;
         opaque++;
         const x = i % fw;
         const y = (i / fw) | 0;
@@ -341,65 +484,295 @@ export function cropAtlasFrames(img: HTMLImageElement): THREE.Texture[] {
         if (x > maxX) maxX = x;
         if (y > maxY) maxY = y;
       }
-      if (opaque < N * 0.06) continue; // empty cell
-      const bbArea = Math.max(1, (maxX - minX + 1) * (maxY - minY + 1));
+      // Jungle atlas mixes dense bushes with sparse palms/grass —
+      // keep only the bushiest clumps (same visual class as forest crowns).
+      const minOpaque = mode === "jungle" ? N * 0.28 : N * 0.05;
+      if (opaque < minOpaque) continue;
+      const bw = maxX - minX + 1;
+      const bh = maxY - minY + 1;
+      const aspect = bw / Math.max(1, bh);
+      // Jungle: prefer round-ish bushes, not tall palm sticks
+      if (mode === "jungle") {
+        if (aspect < 0.75 || aspect > 1.55) continue;
+      } else if (aspect < 0.55 || aspect > 1.85) {
+        continue;
+      }
+      const bbArea = Math.max(1, bw * bh);
       const fill = opaque / bbArea;
-      const bbFrac = bbArea / N;
-      // solid green rectangle: bbox fills most of the cell and is nearly solid
-      if (bbFrac > 0.85 && fill > 0.75) continue;
-      // still mostly opaque sheet overall
-      if (opaque / N > 0.72) continue;
+      if (bbArea / N > 0.9 && fill > 0.82) continue; // solid sheet remnant
+      if (opaque / N > 0.8) continue;
+      // Jungle: only fat canopy discs
+      if (mode === "jungle" && fill < 0.45) continue;
 
-      ctx.putImageData(id, 0, 0);
-      const tex = new THREE.CanvasTexture(canvas);
+      sctx.putImageData(id, 0, 0);
+
+      // Pad into a square so the sprite is round, not tall empty canvas
+      const pad = Math.max(2, Math.floor(Math.max(bw, bh) * 0.08));
+      const side = Math.max(bw, bh) + pad * 2;
+      const out = document.createElement("canvas");
+      out.width = side;
+      out.height = side;
+      const octx = out.getContext("2d")!;
+      octx.clearRect(0, 0, side, side);
+      // bias slightly upward so trunks sit lower in the card (canopy fills view)
+      const dx = Math.floor((side - bw) / 2);
+      const dy = Math.floor((side - bh) / 2) - Math.floor(pad * 0.2);
+      octx.drawImage(src, minX, minY, bw, bh, dx, Math.max(0, dy), bw, bh);
+
+      // Bake sun-lit-top shading into the card (sprites are unlit): real Civ5
+      // crowns read *round* because of a strong top→bottom luminance rolloff.
+      // Gradient averages ~1.0 over the card so the calibrated mean tint holds.
+      // Jungle gets a gentler rolloff — its mass stays dark in the real game.
+      {
+        const [top, span] = mode === "jungle" ? [1.25, 0.55] : [1.45, 0.9];
+        const od = octx.getImageData(0, 0, side, side);
+        const p = od.data;
+        for (let y = 0; y < side; y++) {
+          const t = y / Math.max(1, side - 1); // 0 top → 1 bottom
+          const f = top - span * t;
+          // Feather the card's bottom ~28% to nothing: raw atlas trunk pixels
+          // end in hard rectangular chunks against bright ground otherwise.
+          // (Content sits above ~8% padding, so a short fade never bites.)
+          const fade = t > 0.72 ? Math.max(0, (1 - t) / 0.28) : 1;
+          for (let x = 0; x < side; x++) {
+            const o = (y * side + x) * 4;
+            if (p[o + 3]! === 0) continue;
+            p[o] = Math.min(255, p[o]! * f);
+            p[o + 1] = Math.min(255, p[o + 1]! * f);
+            p[o + 2] = Math.min(255, p[o + 2]! * f);
+            if (fade < 1) p[o + 3] = p[o + 3]! * fade;
+          }
+        }
+        octx.putImageData(od, 0, 0);
+      }
+
+      const tex = new THREE.CanvasTexture(out);
       tex.colorSpace = THREE.SRGBColorSpace;
-      tex.premultiplyAlpha = true;
+      tex.premultiplyAlpha = false;
+      tex.anisotropy = 4;
+      // Linear = soft round crowns; nearest made them look shattered/spindly
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.magFilter = THREE.LinearFilter;
+      tex.generateMipmaps = true;
       frames.push(tex);
     }
   }
   return frames;
 }
 
+/**
+ * Build a canopy-mass texture: RGB from the leaf overlay, alpha from the
+ * forest_tile silhouette mask. Gives irregular woods-shaped puffs with real
+ * leaf color instead of solid green cards.
+ */
+function compositeCanopyMass(
+  maskImg: HTMLImageElement,
+  overlayImg: HTMLImageElement | null,
+  tint: [number, number, number],
+): THREE.Texture {
+  const w = maskImg.width;
+  const h = maskImg.height;
+  const c = document.createElement("canvas");
+  c.width = w;
+  c.height = h;
+  const ctx = c.getContext("2d")!;
+
+  // overlay (or solid tint) as color source
+  if (overlayImg) {
+    ctx.drawImage(overlayImg, 0, 0, w, h);
+  } else {
+    ctx.fillStyle = `rgb(${tint[0]},${tint[1]},${tint[2]})`;
+    ctx.fillRect(0, 0, w, h);
+  }
+  const color = ctx.getImageData(0, 0, w, h);
+  const cd = color.data;
+
+  // mask silhouette
+  const mc = document.createElement("canvas");
+  mc.width = w;
+  mc.height = h;
+  const mctx = mc.getContext("2d")!;
+  mctx.drawImage(maskImg, 0, 0, w, h);
+  const mask = mctx.getImageData(0, 0, w, h).data;
+
+  for (let i = 0; i < cd.length; i += 4) {
+    const lum = mask[i]!; // grayscale mask
+    // soft edge: feather near zero
+    let a = (lum - 12) / 200;
+    if (a <= 0) {
+      cd[i + 3] = 0;
+      continue;
+    }
+    a = Math.min(1, a);
+    // darken slightly toward mask edge for volume cue
+    const edge = Math.min(1, lum / 180);
+    const k = 0.55 + 0.5 * edge;
+    cd[i] = Math.min(255, cd[i]! * k);
+    cd[i + 1] = Math.min(255, cd[i + 1]! * k);
+    cd[i + 2] = Math.min(255, cd[i + 2]! * k);
+    // Pull the litter toward dark forest-floor olive: the overlay alone is a
+    // pale wash, and tree-card bottoms need shadowed ground to sit on
+    // (real Civ5's understory is much darker than open terrain).
+    cd[i] = cd[i]! * 0.4 + 38 * 0.6;
+    cd[i + 1] = cd[i + 1]! * 0.4 + 42 * 0.6;
+    cd[i + 2] = cd[i + 2]! * 0.4 + 22 * 0.6;
+    // also respect overlay alpha if present — but keep a floor so the
+    // understory reads continuous under the stand
+    const oa = overlayImg ? Math.max(0.55, cd[i + 3]! / 255) : 1;
+    cd[i + 3] = Math.min(255, a * oa * 230);
+  }
+  ctx.putImageData(color, 0, 0);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  tex.premultiplyAlpha = false;
+  return tex;
+}
+
+/**
+ * Soft dark contact shadow in the shape of a forest_tile mask. Real Civ5
+ * grounds every stand on a blurred dark blob (see zoomed frame capture) —
+ * it hides trunk bottoms and makes crowns read round against bright terrain.
+ */
+function buildShadowStamp(maskImg: HTMLImageElement): THREE.Texture {
+  const size = 128;
+  // mask grayscale → alpha
+  const m = document.createElement("canvas");
+  m.width = m.height = size;
+  const mctx = m.getContext("2d")!;
+  mctx.drawImage(maskImg, 0, 0, size, size);
+  const md = mctx.getImageData(0, 0, size, size);
+  for (let i = 0; i < size * size; i++) {
+    const lum = md.data[i * 4]!;
+    md.data[i * 4] = 16;
+    md.data[i * 4 + 1] = 18;
+    md.data[i * 4 + 2] = 8;
+    md.data[i * 4 + 3] = lum > 24 ? 255 : 0;
+  }
+  mctx.putImageData(md, 0, 0);
+  // blur into a soft blob (slightly grown so it peeks past the tree edge)
+  const c = document.createElement("canvas");
+  c.width = c.height = size;
+  const ctx = c.getContext("2d")!;
+  ctx.filter = "blur(7px)";
+  ctx.drawImage(m, -6, -6, size + 12, size + 12);
+  const tex = new THREE.CanvasTexture(c);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  tex.premultiplyAlpha = false;
+  return tex;
+}
+
 export class Civ5TileKit {
-  private loader = new THREE.TextureLoader();
   private digimapCache = new Map<string, THREE.Texture>();
   private heightCache = new Map<string, HeightField | null>();
   private forestFrames: THREE.Texture[] = [];
   private jungleFrames: THREE.Texture[] = [];
+  /** forest_tile1..4 placement masks (R channel = canopy validity) */
+  private forestMasks: HeightField[] = [];
+  /** mask × leaf-litter textures for ground (alpha = mask) */
+  private forestGroundTex: THREE.Texture[] = [];
+  /** blurred dark contact-shadow stamps (one per forest_tile mask) */
+  private forestShadowTex: THREE.Texture[] = [];
+  private jungleOverlayTex: THREE.Texture | null = null;
   private corners = hexCornerVectors();
   ready = false;
 
   async init(): Promise<void> {
-    const forestImg = await loadImage(ROOT + "forest_europe.png");
-    const jungleImg = await loadImage(ROOT + "jungle_europe.png");
-    if (forestImg) this.forestFrames = cropAtlasFrames(forestImg);
-    if (jungleImg) this.jungleFrames = cropAtlasFrames(jungleImg);
+    const [forestImg, jungleImg, overlayImg, jungleOverlayImg, ...tileImgs] = await Promise.all([
+      loadImage(ROOT + "forest_europe.png"),
+      loadImage(ROOT + "jungle_europe.png"),
+      loadImage(ROOT + "forest_overlay_europe.png"),
+      loadImage(ROOT + "jungle_overlay_europe.png"),
+      loadImage(ROOT + "forest_tile1.png"),
+      loadImage(ROOT + "forest_tile2.png"),
+      loadImage(ROOT + "forest_tile3.png"),
+      loadImage(ROOT + "forest_tile4.png"),
+    ]);
+    if (forestImg) this.forestFrames = cropAtlasFrames(forestImg, "forest");
+    if (jungleImg) this.jungleFrames = cropAtlasFrames(jungleImg, "jungle");
+    if (jungleOverlayImg) {
+      this.jungleOverlayTex = new THREE.Texture(jungleOverlayImg);
+      this.jungleOverlayTex.colorSpace = THREE.SRGBColorSpace;
+      this.jungleOverlayTex.wrapS = this.jungleOverlayTex.wrapT = THREE.ClampToEdgeWrapping;
+      this.jungleOverlayTex.needsUpdate = true;
+    }
+    for (const img of tileImgs) {
+      if (!img) continue;
+      const { data, w, h } = imageToRgba(img);
+      this.forestMasks.push({ data, w, h, hScale: 1, flat: false });
+      // ground stamp: overlay color × mask alpha (no full-hex dark plate)
+      this.forestGroundTex.push(
+        compositeCanopyMass(img, overlayImg, [42, 78, 32]),
+      );
+      this.forestShadowTex.push(buildShadowStamp(img));
+    }
     this.ready = true;
   }
 
-  private digimap(file: string): THREE.Texture {
-    let t = this.digimapCache.get(file);
-    if (!t) {
-      t = this.loader.load(ROOT + file);
+  /**
+   * Load digimap albedo. Civ5 digimaps store non-color data in alpha (~60–90);
+   * that channel is NOT opacity — treating it as such muddies grass. Bake
+   * A=255 + a light green lift before the texture is ever sampled.
+   */
+  private async digimap(file: string): Promise<THREE.Texture> {
+    const cached = this.digimapCache.get(file);
+    if (cached) return cached;
+
+    const img = await loadImage(ROOT + file);
+    if (!img) {
+      // solid fallback so missing assets don't black-out the map
+      const t = new THREE.Texture();
       t.colorSpace = THREE.SRGBColorSpace;
-      t.wrapS = t.wrapT = THREE.RepeatWrapping;
-      t.anisotropy = 8;
       this.digimapCache.set(file, t);
+      return t;
     }
+    const c = document.createElement("canvas");
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext("2d")!;
+    ctx.drawImage(img, 0, 0);
+    const id = ctx.getImageData(0, 0, c.width, c.height);
+    const d = id.data;
+    for (let i = 0; i < d.length; i += 4) {
+      let r = d[i]!;
+      let g = d[i + 1]!;
+      let b = d[i + 2]!;
+      // digimaps skew olive-brown; lift green midtones toward living grass
+      g = Math.min(255, g * 1.08 + 6);
+      r = Math.min(255, r * 1.03 + 3);
+      b = Math.min(255, b * 0.97);
+      d[i] = r;
+      d[i + 1] = g;
+      d[i + 2] = b;
+      d[i + 3] = 255;
+    }
+    ctx.putImageData(id, 0, 0);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.anisotropy = 8;
+    t.minFilter = THREE.LinearMipmapLinearFilter;
+    t.magFilter = THREE.LinearFilter;
+    t.generateMipmaps = true;
+    t.needsUpdate = true;
+    this.digimapCache.set(file, t);
     return t;
   }
 
   async heightField(files: string[], hScale: number, flat: boolean): Promise<HeightField | null> {
-    if (files.length === 0 || flat) return { data: new Uint8ClampedArray(4), w: 1, h: 1, hScale, flat: true };
+    if (files.length === 0 || flat) {
+      return { data: new Uint8ClampedArray(4), w: 1, h: 1, hScale, flat: true };
+    }
     const file = files[0]!;
-    if (this.heightCache.has(file)) return this.heightCache.get(file)!;
+    const cacheKey = `${file}|${hScale}`;
+    if (this.heightCache.has(cacheKey)) return this.heightCache.get(cacheKey)!;
     const img = await loadImage(ROOT + file);
     if (!img) {
-      this.heightCache.set(file, null);
+      this.heightCache.set(cacheKey, null);
       return null;
     }
     const { data, w, h } = imageToRgba(img);
-    // detect constant flat sentinel
     let min = 255;
     let max = 0;
     for (let i = 0; i < data.length; i += 4) {
@@ -408,8 +781,14 @@ export class Civ5TileKit {
       if (v > max) max = v;
     }
     const isFlat = max - min < 3 || min > 180;
-    const hf: HeightField = { data, w, h, hScale: isFlat ? 0.04 : hScale, flat: isFlat };
-    this.heightCache.set(file, hf);
+    const hf: HeightField = {
+      data,
+      w,
+      h,
+      hScale: isFlat ? 0.04 : hScale,
+      flat: isFlat,
+    };
+    this.heightCache.set(cacheKey, hf);
     return hf;
   }
 
@@ -419,18 +798,24 @@ export class Civ5TileKit {
     return look.heights[i]!;
   }
 
+  private async resolveHf(look: TerrainLook, key: string): Promise<HeightField | null> {
+    const hfFile = this.pickHeightFile(look, key);
+    return this.heightField(hfFile ? [hfFile] : [], look.hScale, look.flat || !hfFile);
+  }
+
   /**
    * Build merged geometry for a group of tiles sharing the same digimap.
-   * Heights are per-tile (local UV sample). Albedo uses world UV.
-   * @param divs subdivision density (default TILE_DIVS; use TILE_DIVS_FULLMAP for whole boards)
+   * Heights: welded board base when present, else piece heightmap.
+   * Albedo uses world UV.
    */
   async buildTerrainMesh(
     tiles: Civ5TileSpec[],
-    opts: { divs?: number } = {},
+    opts: { divs?: number; foliage?: FoliageQuality } = {},
   ): Promise<THREE.Group> {
     const group = new THREE.Group();
     const divs = opts.divs ?? TILE_DIVS;
-    // group by digimap
+    const foliage = opts.foliage ?? (divs >= 14 ? "detail" : "full");
+
     const byDigi = new Map<string, { specs: Civ5TileSpec[]; look: TerrainLook }>();
     for (const t of tiles) {
       const look = lookFor(t.baseTerrain, t.features);
@@ -440,17 +825,9 @@ export class Civ5TileKit {
     }
 
     for (const [digi, { specs, look }] of byDigi) {
-      // pre-load height variants used by this group
       const hfByKey = new Map<string, HeightField | null>();
       for (const s of specs) {
-        const hfFile = this.pickHeightFile(look, s.key);
-        const cacheKey = `${hfFile ?? "__flat__"}|${look.hScale}|${look.flat}`;
-        if (!hfByKey.has(cacheKey)) {
-          hfByKey.set(
-            cacheKey,
-            await this.heightField(hfFile ? [hfFile] : [], look.hScale, look.flat || !hfFile),
-          );
-        }
+        if (!hfByKey.has(s.key)) hfByKey.set(s.key, await this.resolveHf(look, s.key));
       }
       const tPer = 6 * divs * divs;
       const positions = new Float32Array(specs.length * tPer * 9);
@@ -459,9 +836,7 @@ export class Civ5TileKit {
       let u = 0;
 
       for (const s of specs) {
-        const hfFile = this.pickHeightFile(look, s.key);
-        const cacheKey = `${hfFile ?? "__flat__"}|${look.hScale}|${look.flat}`;
-        const hf = hfByKey.get(cacheKey) ?? null;
+        const hf = hfByKey.get(s.key) ?? null;
         const cx = s.world.x;
         const cy = s.world.y;
 
@@ -471,8 +846,7 @@ export class Civ5TileKit {
           const point = (i: number, j: number): [number, number, number] => {
             const lx = ((i * a.x + j * b.x) / divs) * OVERLAP;
             const ly = ((i * a.y + j * b.y) / divs) * OVERLAP;
-            // sample height in unscaled local space so seams stay soft
-            const z = sampleHeight(hf, lx / OVERLAP, ly / OVERLAP);
+            const z = terrainHeightAt(s, look, hf, this.corners, lx / OVERLAP, ly / OVERLAP);
             return [cx + lx, cy + ly, z];
           };
           for (let i = 0; i < divs; i++) {
@@ -503,63 +877,179 @@ export class Civ5TileKit {
       geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
       geo.computeVertexNormals();
 
+      const map = await this.digimap(digi);
       const mat = look.water
         ? new THREE.MeshLambertMaterial({
-            map: this.digimap(digi),
-            color: new THREE.Color(look.digimap.includes("shallow") ? 0x4a8ab0 : 0x2a5a88),
+            map,
+            color: new THREE.Color(look.digimap.includes("shallow") ? 0x3a7a9a : 0x1e4a72),
             transparent: true,
-            opacity: 0.88,
+            opacity: 0.9,
           })
-        : new THREE.MeshLambertMaterial({ map: this.digimap(digi) });
+        : new THREE.MeshLambertMaterial({
+            map,
+            // slight warm lift — digimaps skew dark under Lambert+ACES
+            color: new THREE.Color(0xf4f6ec),
+          });
 
       group.add(new THREE.Mesh(geo, mat));
     }
 
-    // canopy overlays + tree billboards
-    await this.addFeatureLayers(group, tiles);
+    await this.addFeatureLayers(group, tiles, foliage);
     return group;
   }
 
-  private async addFeatureLayers(group: THREE.Group, tiles: Civ5TileSpec[]): Promise<void> {
+  private async addFeatureLayers(
+    group: THREE.Group,
+    tiles: Civ5TileSpec[],
+    quality: FoliageQuality,
+  ): Promise<void> {
     const forestTiles = tiles.filter((t) => t.features.includes("Forest"));
     const jungleTiles = tiles.filter((t) => t.features.includes("Jungle"));
 
-    // ground canopy stamps (Civ5 forest_overlay style)
-    if (forestTiles.length) {
-      group.add(
-        await this.buildCanopyOverlay(forestTiles, "forest_overlay_europe.png", 0.004),
-      );
+    // LOD: hero approaches forests.xml (360); full map keeps a sparse stand.
+    const targetTrees =
+      quality === "hero"
+        ? FOREST_CFG.randomTreesPerTile
+        : quality === "detail"
+          ? Math.round(FOREST_CFG.randomTreesPerTile * 0.4)
+          : Math.round(FOREST_CFG.randomTreesPerTile * 0.12);
+    // Slightly larger round cards; density still high via tight poisson spacing
+    const scaleRange: [number, number] =
+      quality === "hero" ? [0.18, 0.3] : quality === "detail" ? [0.2, 0.32] : [0.22, 0.36];
+
+    // Layering (renderOrder + polygonOffset): digimap terrain is 0.
+    // 1) Contact shadow (blurred dark mask stamp — grounds the stand, real
+    //    Civ5 does this under every forest/jungle; hides trunk bottoms)
+    // 2) Masked ground leaf-litter (never a full-hex dark wash)
+    // 3) Tree / jungle sprites
+    if (this.forestShadowTex.length) {
+      if (forestTiles.length) {
+        const shadow = this.buildMaskedGroundOverlay(forestTiles, 0.65, this.forestShadowTex, 0.003);
+        group.add(shadow);
+      }
+      if (jungleTiles.length) {
+        // jungle mass is darker → heavier shadow
+        const shadow = this.buildMaskedGroundOverlay(jungleTiles, 0.75, this.forestShadowTex, 0.003);
+        group.add(shadow);
+      }
+    }
+    if (forestTiles.length && this.forestGroundTex.length) {
+      const litter = this.buildMaskedGroundOverlay(forestTiles, FOREST_CFG.overlayAlpha);
+      litter.renderOrder = 1;
+      group.add(litter);
     }
     if (jungleTiles.length) {
-      group.add(
-        await this.buildCanopyOverlay(jungleTiles, "jungle_overlay_europe.png", 0.005),
-      );
+      // Dark understory so jungle reads continuous even between crowns
+      if (this.jungleOverlayTex) {
+        const litter = this.buildLocalUvHexMesh(
+          jungleTiles,
+          this.jungleOverlayTex,
+          0.0035,
+          0.5,
+          true,
+        );
+        litter.renderOrder = 1;
+        group.add(litter);
+      }
     }
 
-    // NOTE: vertical tree billboards from the atlas are disabled for now —
-    // imperfect sheet cutouts produced floating green rectangles. Canopy is
-    // the hex-draped overlay above; 3D .gr2 trees or hand-cut sprites later.
-    void this.forestFrames;
-    void this.jungleFrames;
+    if (forestTiles.length && this.forestFrames.length) {
+      const trees = this.buildForestStand(forestTiles, this.forestFrames, targetTrees, scaleRange, {
+        useMask: true,
+        // Matched against a real Civ5 frame capture: canopy mean RGB ≈ (70,76,39),
+        // warm olive with B/G ≈ 0.52 — the old pale-sage tint read cold/washed.
+        tint: 0x9d9152,
+      });
+      trees.renderOrder = 2;
+      group.add(trees);
+    }
+    if (jungleTiles.length && this.jungleFrames.length) {
+      // Jungle: a bit *less* dense than forest (was overpacked), still bushy cards.
+      // forest_tile masks keep an organic edge.
+      const trees = this.buildForestStand(
+        jungleTiles,
+        this.jungleFrames,
+        Math.round(targetTrees * 0.75),
+        [scaleRange[0] * 1.05, scaleRange[1] * 1.15],
+        {
+          useMask: this.forestMasks.length > 0,
+          // Real-game jungle canopy mean RGB ≈ (58,67,42): darker than forest, warm
+          tint: 0x687146,
+          wider: true,
+          pack: 1.05, // slightly looser than forest
+        },
+      );
+      trees.renderOrder = 2;
+      group.add(trees);
+    }
   }
 
-  /** Alpha canopy stamp draped on each feature tile (local UV 0–1). */
-  private async buildCanopyOverlay(
-    tiles: Civ5TileSpec[],
-    file: string,
-    zLift: number,
-  ): Promise<THREE.Mesh> {
-    const img = await loadImage(ROOT + file);
-    const tex = this.digimap(file);
-    tex.wrapS = tex.wrapT = THREE.ClampToEdgeWrapping;
-    // force reload path if digimap assumed repeat
-    if (img) {
-      const t = new THREE.Texture(img);
-      t.colorSpace = THREE.SRGBColorSpace;
-      t.needsUpdate = true;
-      return this.buildLocalUvHexMesh(tiles, t, zLift, 0.85);
+  private groundZ(s: Civ5TileSpec, lx: number, ly: number): number {
+    const look = lookFor(s.baseTerrain, s.features);
+    const hfFile = this.pickHeightFile(look, s.key);
+    const cacheKey = `${hfFile ?? ""}|${look.hScale}`;
+    const hf =
+      look.flat || !hfFile
+        ? ({ data: new Uint8ClampedArray(4), w: 1, h: 1, hScale: look.hScale, flat: true } as HeightField)
+        : (this.heightCache.get(cacheKey) ?? null);
+    return terrainHeightAt(s, look, hf, this.corners, lx, ly);
+  }
+
+  /** Point inside flat-top hex of circumradius 1 (half-plane test). */
+  private inHex(lx: number, ly: number, pad = 0.02): boolean {
+    for (let i = 0; i < 6; i++) {
+      const a = this.corners[i]!;
+      const b = this.corners[(i + 1) % 6]!;
+      // edge a→b, inward normal points toward center (0,0)
+      const ex = b.x - a.x;
+      const ey = b.y - a.y;
+      // cross (b-a) x (p-a); for CCW corners, inside is cross >= 0
+      const cross = ex * (ly - a.y) - ey * (lx - a.x);
+      // corners are clockwise in our kit (clock hours) → inside is cross <= 0
+      if (cross > pad) return false;
     }
-    return this.buildLocalUvHexMesh(tiles, tex, zLift, 0.85);
+    return true;
+  }
+
+  /** Sample forest_tile mask at local offset; 0..1 canopy validity. */
+  private sampleMask(mask: HeightField, lx: number, ly: number): number {
+    const [u, v] = localToUV(lx, ly);
+    return sampleR8(mask.data, mask.w, mask.h, u, v) / 255;
+  }
+
+  private maskForTile(key: string): HeightField | null {
+    if (this.forestMasks.length === 0) return null;
+    return this.forestMasks[hashKey(key) % this.forestMasks.length]!;
+  }
+
+  /**
+   * Ground leaf litter using mask×overlay textures (organic footprint, not full hex).
+   * polygonOffset sits it on digimap without z-fighting.
+   */
+  private buildMaskedGroundOverlay(
+    tiles: Civ5TileSpec[],
+    opacity: number,
+    texs: THREE.Texture[] = this.forestGroundTex,
+    zLift = 0.0035,
+  ): THREE.Group {
+    const group = new THREE.Group();
+    if (texs.length === 0) return group;
+
+    // group tiles by mask variant so we can batch
+    const byVar = new Map<number, Civ5TileSpec[]>();
+    for (const t of tiles) {
+      const vi = hashKey(t.key) % texs.length;
+      const arr = byVar.get(vi) ?? [];
+      arr.push(t);
+      byVar.set(vi, arr);
+    }
+    for (const [vi, specs] of byVar) {
+      const tex = texs[vi]!;
+      const mesh = this.buildLocalUvHexMesh(specs, tex, zLift, opacity, false);
+      mesh.renderOrder = 1;
+      group.add(mesh);
+    }
+    return group;
   }
 
   private buildLocalUvHexMesh(
@@ -567,27 +1057,30 @@ export class Civ5TileKit {
     map: THREE.Texture,
     zLift: number,
     opacity: number,
+    rotatePerTile: boolean,
   ): THREE.Mesh {
-    const divs = 8;
+    const divs = 6;
     const tPer = 6 * divs * divs;
     const positions = new Float32Array(tiles.length * tPer * 9);
     const uvs = new Float32Array(tiles.length * tPer * 6);
     let p = 0;
     let u = 0;
     for (const s of tiles) {
-      const look = lookFor(s.baseTerrain, s.features);
-      const hfFile = this.pickHeightFile(look, s.key);
-      const hf = hfFile ? this.heightCache.get(hfFile) ?? null : null;
       const cx = s.world.x;
       const cy = s.world.y;
+      const ang = rotatePerTile ? hash01(s.key, 3) * Math.PI * 2 : 0;
+      const cos = Math.cos(ang);
+      const sin = Math.sin(ang);
       for (let sec = 0; sec < 6; sec++) {
         const a = this.corners[sec]!;
         const b = this.corners[(sec + 1) % 6]!;
         const point = (i: number, j: number) => {
           const lx = (i * a.x + j * b.x) / divs;
           const ly = (i * a.y + j * b.y) / divs;
-          const z = sampleHeight(hf, lx, ly) + zLift;
-          const [uu, vv] = localToUV(lx, ly);
+          const z = this.groundZ(s, lx, ly) + zLift;
+          const rx = lx * cos - ly * sin;
+          const ry = lx * sin + ly * cos;
+          const [uu, vv] = localToUV(rx * 0.92, ry * 0.92);
           return { x: cx + lx, y: cy + ly, z, uu, vv };
         };
         for (let i = 0; i < divs; i++) {
@@ -613,12 +1106,106 @@ export class Civ5TileKit {
     geo.computeVertexNormals();
     return new THREE.Mesh(
       geo,
-      new THREE.MeshLambertMaterial({
+      new THREE.MeshBasicMaterial({
         map,
         transparent: true,
         opacity,
         depthWrite: false,
+        depthTest: true,
+        polygonOffset: true,
+        polygonOffsetFactor: -2,
+        polygonOffsetUnits: -2,
       }),
     );
+  }
+
+  /**
+   * Firaxis-style forest/jungle stand (forests.xml recipe):
+   *   random + min spacing (Poisson rejection), optional forest_tile mask.
+   * Camera-facing sprites; density approaches 360/tile on hero.
+   */
+  private buildForestStand(
+    tiles: Civ5TileSpec[],
+    frames: THREE.Texture[],
+    targetPerTile: number,
+    scaleRange: [number, number],
+    opts: { useMask?: boolean; tint?: number; wider?: boolean; pack?: number } = {},
+  ): THREE.Group {
+    const group = new THREE.Group();
+    if (frames.length === 0) return group;
+    const useMask = opts.useMask ?? true;
+    const tint = opts.tint ?? 0xd4e0c4;
+    const wider = opts.wider ?? false;
+    const pack = opts.pack ?? 1;
+
+    const matByFrame = new Map<THREE.Texture, THREE.SpriteMaterial>();
+    for (const tex of frames) {
+      matByFrame.set(
+        tex,
+        new THREE.SpriteMaterial({
+          map: tex,
+          transparent: true,
+          depthTest: true,
+          depthWrite: false,
+          // lower for jungle-soft edges after dilate
+          alphaTest: wider ? 0.08 : 0.12,
+          sizeAttenuation: true,
+          color: new THREE.Color(tint),
+        }),
+      );
+    }
+
+    const maxAttempts = targetPerTile * 55;
+
+    for (const tile of tiles) {
+      const mask = useMask ? this.maskForTile(tile.key) : null;
+      const placed: { lx: number; ly: number; scale: number }[] = [];
+      let attempts = 0;
+      let n = 0;
+
+      while (placed.length < targetPerTile && attempts < maxAttempts) {
+        attempts++;
+        const lx = (hash01(tile.key, 7000 + attempts * 3) * 2 - 1) * 1.05;
+        const ly = (hash01(tile.key, 8000 + attempts * 3) * 2 - 1) * 0.95;
+        if (!this.inHex(lx, ly, 0.05)) continue;
+
+        if (mask) {
+          const m = this.sampleMask(mask, lx, ly);
+          // jungle: slightly softer mask threshold so the blob fills
+          if (m < (wider ? 0.16 : 0.22)) continue;
+        }
+
+        const scale =
+          scaleRange[0] + hash01(tile.key, 9000 + n) * (scaleRange[1] - scaleRange[0]);
+        const minD = forestMinDist(scale) * pack;
+
+        let ok = true;
+        for (const p of placed) {
+          const dx = p.lx - lx;
+          const dy = p.ly - ly;
+          const need = (minD + forestMinDist(p.scale) * pack) * 0.5;
+          if (dx * dx + dy * dy < need * need) {
+            ok = false;
+            break;
+          }
+        }
+        if (!ok) continue;
+
+        placed.push({ lx, ly, scale });
+        const gz = this.groundZ(tile, lx, ly);
+        const tex = frames[hashKey(tile.key + "|t|" + n) % frames.length]!;
+        const mat = matByFrame.get(tex)!;
+        const sprite = new THREE.Sprite(mat);
+        // Mid-canopy pivot → round bush mass (not poles)
+        sprite.center.set(0.5, 0.3);
+        sprite.position.set(tile.world.x + lx, tile.world.y + ly, gz + scale * 0.2);
+        // Broader than tall for continuous canopy look
+        sprite.scale.set(scale * (wider ? 1.2 : 1.08), scale * (wider ? 1.05 : 0.95), 1);
+        sprite.renderOrder = 2;
+        group.add(sprite);
+        n++;
+      }
+    }
+    return group;
   }
 }

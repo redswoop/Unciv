@@ -14,8 +14,7 @@
         border-radius: 8px; padding: 12px 16px; max-width: 380px;
       }
       #hud h1 { font-size: 15px; margin: 0 0 4px; color: #f3d789; }
-      #hud .sub { font-size: 12px; opacity: 0.85; margin: 0 0 8px; }
-      #hud a { color: #9cf; font-size: 12px; margin-right: 10px; }
+      #hud .sub { font-size: 12px; opacity: 0.85; margin: 0 0 0; }
       #hud .muted { font-size: 11px; opacity: 0.55; margin-top: 8px; }
       #status {
         position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
@@ -30,14 +29,7 @@
     <div id="hud">
       <h1 id="hud-title">Civ5 tiles</h1>
       <p class="sub" id="hud-sub"></p>
-      <div>
-        <a href="?mode=gallery">gallery</a>
-        <a href="?mode=chunk&x=-3&y=-44&r=11">forest chunk</a>
-        <a href="?mode=chunk&x=-4.5&y=12&r=12">Korea desert</a>
-        <a href="?mode=chunk&x=0&y=0&r=18">origin</a>
-        <a href="/hero.html">hero tile</a>
-        <a href="/">full map</a>
-      </div>
+      <nav id="site-nav" aria-label="Views"></nav>
       <p class="muted">drag: pan · wheel: zoom · right-drag: tilt · assets from local Civ5 extract</p>
     </div>
     <script type="module" src="/src/chunk-main.ts"></script>
