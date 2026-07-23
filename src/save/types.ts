@@ -75,6 +75,9 @@ export interface CityData {
   tiles?: HexPos[];
   workedTiles?: HexPos[];
   isBeingRazed?: boolean;
+  isOriginalCapital?: boolean;
+  /** Built buildings — world wonders resolved against Buildings.json. */
+  cityConstructions?: { builtBuildings?: string[] };
 }
 
 export interface CivilizationData {
@@ -85,6 +88,8 @@ export interface CivilizationData {
   playerId?: string;
   gold?: number;
   cities?: CityData[];
+  /** Researched techs — the source of the civ's era (city looks). */
+  tech?: { techsResearched?: string[] };
 }
 
 export interface GameParametersData {

@@ -244,3 +244,34 @@ describe("board model from the REAL turn-518 save", () => {
     }
   });
 });
+
+describe("city era + wonders (real saves)", () => {
+  test("turn-0 aztecs: ancient era, no wonders, capital flagged", async () => {
+    const game = await loadSaveFromFile(join(import.meta.dir, "../../public/saves/aztecs-turn0.unciv"));
+    const ruleset = await readRulesetFromDisk(baseRulesetForSave(game), RULESET_DIR);
+    const model = buildBoardModel(game, ruleset, hexCornerVectors());
+    const withCities = model.cities;
+    expect(withCities.length).toBeGreaterThan(0);
+    for (const c of withCities) {
+      expect(c.era).toBe("Ancient era");
+      expect(c.eraT).toBeCloseTo(0, 5);
+      expect(c.wonders).toEqual([]);
+    }
+    expect(withCities.some((c) => c.capital)).toBe(true);
+  });
+
+  test("turn-518: late eras and real world wonders surface", async () => {
+    const game = await loadSaveFromFile(join(import.meta.dir, "../../public/saves/turn518-14civs.unciv"));
+    const ruleset = await readRulesetFromDisk(baseRulesetForSave(game), RULESET_DIR);
+    const model = buildBoardModel(game, ruleset, hexCornerVectors());
+    const eras = new Set(model.cities.map((c) => c.era));
+    expect(eras.has("Information era") || eras.has("Atomic era") || eras.has("Modern era")).toBe(true);
+    const allWonders = model.cities.flatMap((c) => c.wonders);
+    expect(allWonders).toContain("The Oracle");
+    // eraT ordered sanely
+    for (const c of model.cities) {
+      expect(c.eraT).toBeGreaterThanOrEqual(0);
+      expect(c.eraT).toBeLessThanOrEqual(1);
+    }
+  });
+});

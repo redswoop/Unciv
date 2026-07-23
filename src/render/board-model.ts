@@ -19,7 +19,14 @@ import {
   type GameInfo,
   type TileData,
 } from "../save/types";
-import { isMilitaryUnit, resolveNation, resolveTerrain, type Ruleset } from "../ruleset/ruleset";
+import {
+  civEra,
+  isMilitaryUnit,
+  isWorldWonder,
+  resolveNation,
+  resolveTerrain,
+  type Ruleset,
+} from "../ruleset/ruleset";
 
 export interface CivColors {
   outer: [number, number, number];
@@ -80,6 +87,13 @@ export interface CityMarker {
   civ: string;
   population: number;
   z: number;
+  /** owning civ's era (from techsResearched × Techs.json), if derivable */
+  era?: string;
+  /** 0..1 position of era in the ruleset's era order (0 ancient → 1 information) */
+  eraT: number;
+  /** world wonders built here (Buildings.json isWonder) */
+  wonders: string[];
+  capital: boolean;
 }
 
 export interface UnitMarker {
@@ -257,10 +271,11 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
   const ownerByTile = new Map<string, string>();
   const civColors = new Map<string, CivColors>();
   const cities: CityMarker[] = [];
-  const pendingCities: { city: CityData; civName: string }[] = [];
+  const pendingCities: { city: CityData; civName: string; era?: string }[] = [];
 
   for (const civ of game.civilizations) {
     const civName = civ.civName ?? civ.civID ?? "?";
+    const era = civEra(ruleset, civ.tech?.techsResearched);
     const nation = resolveNation(ruleset, civName);
     civColors.set(
       civName,
@@ -271,7 +286,7 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
           : fallbackColor(civName),
     );
     for (const city of civ.cities ?? []) {
-      pendingCities.push({ city, civName });
+      pendingCities.push({ city, civName, era });
       // city center may or may not be listed in city.tiles; own it explicitly
       ownerByTile.set(posKey(city.location), civName);
       for (const t of city.tiles ?? []) ownerByTile.set(posKey(t), civName);
@@ -434,7 +449,8 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
   }
 
   // ——— cities sit on their tile's elevation ———
-  for (const { city, civName } of pendingCities) {
+  for (const { city, civName, era } of pendingCities) {
+    const eraIdx = era ? ruleset.eraOrder.indexOf(era) : -1;
     cities.push({
       world: hex2WorldCoords({ x: posX(city.location), y: posY(city.location) }),
       key: posKey(city.location),
@@ -442,6 +458,15 @@ export function buildBoardModel(game: GameInfo, ruleset: Ruleset, corners: Vec2[
       civ: civName,
       population: city.population?.population ?? 1,
       z: Math.max(tileByKey.get(posKey(city.location))?.height ?? 0, 0.02),
+      era,
+      eraT:
+        eraIdx >= 0 && ruleset.eraOrder.length > 1
+          ? eraIdx / (ruleset.eraOrder.length - 1)
+          : 0,
+      wonders: (city.cityConstructions?.builtBuildings ?? []).filter((b) =>
+        isWorldWonder(ruleset, b),
+      ),
+      capital: city.isOriginalCapital === true,
     });
   }
 

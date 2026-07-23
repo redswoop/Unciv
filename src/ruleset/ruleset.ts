@@ -52,6 +52,20 @@ export interface UnitDef {
   unitType?: string;
 }
 
+export interface BuildingDef {
+  name: string;
+  isWonder?: boolean;
+  isNationalWonder?: boolean;
+  requiredTech?: string;
+}
+
+/** One column of Techs.json — techs grouped by column with a shared era. */
+export interface TechColumnDef {
+  columnNumber?: number;
+  era?: string;
+  techs?: { name?: string }[];
+}
+
 export interface UnitTypeDef {
   name: string;
   movementType?: "Land" | "Water" | "Air";
@@ -65,6 +79,12 @@ export interface Ruleset {
   nations: Map<string, NationDef>;
   units: Map<string, UnitDef>;
   unitTypes: Map<string, UnitTypeDef>;
+  /** World + national wonders and regular buildings (empty if Buildings.json absent). */
+  buildings: Map<string, BuildingDef>;
+  /** tech name -> { era, column } from Techs.json (empty if absent). */
+  techInfo: Map<string, { era: string; column: number }>;
+  /** Era names in tech-column order (deduped, e.g. Ancient era → Information era). */
+  eraOrder: string[];
   /** Names the save asked for that the ruleset does not define. */
   unresolved: Set<string>;
 }
@@ -89,10 +109,28 @@ export interface RulesetFileText {
   nations: string;
   units: string;
   unitTypes: string;
+  /** Optional (older vendored rulesets lack them): city-era + wonder support. */
+  techs?: string;
+  buildings?: string;
 }
 
 /** Pure constructor from file texts — I/O stays at the edges (browser fetch / Bun file). */
 export function buildRuleset(name: string, files: RulesetFileText): Ruleset {
+  const techInfo = new Map<string, { era: string; column: number }>();
+  const eraOrder: string[] = [];
+  if (files.techs) {
+    const columns = parseGdxJson(files.techs);
+    if (Array.isArray(columns)) {
+      for (const raw of columns) {
+        const col = raw as TechColumnDef;
+        const era = col.era ?? "?";
+        if (!eraOrder.includes(era)) eraOrder.push(era);
+        for (const t of col.techs ?? []) {
+          if (t.name) techInfo.set(t.name, { era, column: col.columnNumber ?? 0 });
+        }
+      }
+    }
+  }
   return {
     name,
     terrains: toMap<TerrainDef>(parseGdxJson(files.terrains)),
@@ -101,6 +139,11 @@ export function buildRuleset(name: string, files: RulesetFileText): Ruleset {
     nations: toMap<NationDef>(parseGdxJson(files.nations)),
     units: toMap<UnitDef>(parseGdxJson(files.units)),
     unitTypes: toMap<UnitTypeDef>(parseGdxJson(files.unitTypes)),
+    buildings: files.buildings
+      ? toMap<BuildingDef>(parseGdxJson(files.buildings))
+      : new Map(),
+    techInfo,
+    eraOrder,
     unresolved: new Set(),
   };
 }
@@ -112,15 +155,22 @@ const FILE_NAMES: Record<keyof RulesetFileText, string> = {
   nations: "Nations.json",
   units: "Units.json",
   unitTypes: "UnitTypes.json",
+  techs: "Techs.json",
+  buildings: "Buildings.json",
 };
+
+const OPTIONAL_FILES = new Set<keyof RulesetFileText>(["techs", "buildings"]);
 
 /** Browser: fetch the vendored ruleset from public/. */
 export async function fetchRuleset(base: BaseRulesetName): Promise<Ruleset> {
   const entries = await Promise.all(
     (Object.entries(FILE_NAMES) as [keyof RulesetFileText, string][]).map(
       async ([key, file]) => {
-        const res = await fetch(`rulesets/${encodeURIComponent(base)}/${file}`);
-        if (!res.ok) throw new Error(`Failed to fetch ruleset file ${base}/${file}: ${res.status}`);
+        const res = await fetch(`rulesets/${encodeURIComponent(base)}/${file}`).catch(() => null);
+        if (!res?.ok) {
+          if (OPTIONAL_FILES.has(key)) return [key, undefined] as const;
+          throw new Error(`Failed to fetch ruleset file ${base}/${file}: ${res?.status}`);
+        }
         return [key, await res.text()] as const;
       },
     ),
@@ -133,11 +183,15 @@ export async function readRulesetFromDisk(
   base: BaseRulesetName,
   rootDir: string,
 ): Promise<Ruleset> {
-  const bun = (globalThis as { Bun?: { file(p: string): { text(): Promise<string> } } }).Bun;
+  const bun = (globalThis as { Bun?: { file(p: string): { text(): Promise<string>; exists(): Promise<boolean> } } }).Bun;
   if (!bun) throw new Error("readRulesetFromDisk requires Bun");
   const entries = await Promise.all(
     (Object.entries(FILE_NAMES) as [keyof RulesetFileText, string][]).map(
-      async ([key, file]) => [key, await bun.file(`${rootDir}/${base}/${file}`).text()] as const,
+      async ([key, file]) => {
+        const f = bun.file(`${rootDir}/${base}/${file}`);
+        if (OPTIONAL_FILES.has(key) && !(await f.exists())) return [key, undefined] as const;
+        return [key, await f.text()] as const;
+      },
     ),
   );
   return buildRuleset(base, Object.fromEntries(entries) as unknown as RulesetFileText);
@@ -172,6 +226,24 @@ export function resolveNation(rs: Ruleset, name: string): NationDef | undefined 
 }
 export function resolveUnit(rs: Ruleset, name: string): UnitDef | undefined {
   return resolve(rs, rs.units, name);
+}
+
+/**
+ * A civ's current era: the era of its furthest-column researched tech.
+ * Undefined when Techs.json is absent or nothing matches (very old saves).
+ */
+export function civEra(rs: Ruleset, techsResearched: string[] | undefined): string | undefined {
+  let best: { era: string; column: number } | undefined;
+  for (const t of techsResearched ?? []) {
+    const info = rs.techInfo.get(t);
+    if (info && (!best || info.column > best.column)) best = info;
+  }
+  return best?.era;
+}
+
+/** World wonders only — national wonders repeat per civ and aren't landmarks. */
+export function isWorldWonder(rs: Ruleset, buildingName: string): boolean {
+  return rs.buildings.get(buildingName)?.isWonder === true;
 }
 
 /** Is this unit name a military unit? (unitType → UnitTypes; civilians lack ranged/melee strength) */

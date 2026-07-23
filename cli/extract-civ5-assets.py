@@ -242,6 +242,155 @@ def extract_named_from_fpk(fpk_path: Path, want: set[str] | None = None, want_re
     return written
 
 
+def parse_fpk_exact(data: bytes) -> list[tuple[str, int, int]]:
+    """Exact FPK v6 TOC walk (reverse-engineered from hex dumps):
+
+    header: u32 version, "FPK_", u32 data_start, u16 zero, then per entry:
+      u32 name_len, name[name_len], u32 pad_n, pad[pad_n], u32 unk,
+      u32 size, u32 offset
+
+    Unlike parse_fpk's heuristic scan this never mis-aligns, so it works on
+    packs whose first entry has non-zero pad (StrategicViewTextures etc.).
+    """
+    if len(data) < 16 or data[4:8] != b"FPK_":
+        raise ValueError("not a Civ5 FPK")
+    off = 14
+    entries: list[tuple[str, int, int]] = []
+    n = len(data)
+    while off + 4 <= n:
+        (name_len,) = struct.unpack_from("<I", data, off)
+        if name_len == 0 or name_len > 300 or off + 4 + name_len > n:
+            break
+        name = data[off + 4 : off + 4 + name_len].decode("ascii", errors="replace")
+        p = off + 4 + name_len
+        if p + 4 > n:
+            break
+        (pad_n,) = struct.unpack_from("<I", data, p)
+        if pad_n > 64:
+            break
+        p += 4 + pad_n
+        if p + 12 > n:
+            break
+        _unk, size, offset = struct.unpack_from("<III", data, p)
+        entries.append((name, size, offset))
+        off = p + 12
+    return entries
+
+
+# Strategic-view art (256x256 DXT sprites drawn flat on tiles — our on-map
+# resource/improvement/wonder art) + city sprites. Names are the Firaxis
+# originals; the renderer maps Unciv ids onto them in asset-map.json.
+SV_BASE = {
+    # resources
+    "sv_aluminum.dds", "sv_banana.dds", "sv_coal.dds", "sv_cotton.dds",
+    "sv_cow.dds", "sv_deer.dds", "sv_dye.dds", "sv_fish.dds", "sv_fur.dds",
+    "sv_gems.dds", "sv_gold.dds", "sv_horse.dds", "sv_incense.dds",
+    "sv_iron.dds", "sv_ivory.dds", "sv_marble.dds", "sv_oil.dds",
+    "sv_pearl.dds", "sv_sheep.dds", "sv_silk.dds", "sv_silver.dds",
+    "sv_spices.dds", "sv_sugar.dds", "sv_uranium.dds", "sv_whale.dds",
+    "sv_wheat.dds", "sv_wine.dds",
+    # improvements
+    "sv_farm.dds", "sv_mine.dds", "sv_pasture.dds", "sv_plantation.dds",
+    "sv_quarry.dds", "sv_tradingpost.dds", "sv_lumbermill.dds", "sv_fort.dds",
+    "sv_oilwell.dds", "sv_offshoreplatform.dds", "sv_fishingboats.dds",
+    "sv_customhouse.dds", "sv_academy.dds", "sv_citadel.dds",
+    "sv_manufactory.dds", "sv_camp.dds", "sv_ancientruins.dds",
+    "sv_barbariancamp.dds", "sv_cityruins.dds", "sv_landmark.dds",
+    # natural wonders
+    "sv_fuji.dds", "sv_geyser.dds", "sv_gibraltar.dds", "sv_krakatoa.dds",
+    "sv_mesa.dds", "sv_crater.dds", "sv_coralreef.dds", "sv_naturalwonders.dds",
+    # city sprites (size variants)
+    "sv_ancient_africa_small_city.dds", "sv_ancient_africa_medium_city.dds",
+    "sv_ancient_africa_large_city.dds",
+}
+
+SV_EXP1 = {
+    # G&K resources
+    "sv_citrus.dds", "sv_copper.dds", "sv_crabs.dds", "sv_salt.dds",
+    "sv_truffles.dds",
+    # G&K improvements + natural wonders
+    "sv_holy_site.dds", "sv_polder.dds",
+    "sv_mount_kailash.dds", "sv_mount_sinai.dds", "sv_sri_pada.dds",
+    "sv_uluru.dds",
+}
+
+
+# Ground decals: crop fields, river banks, road strips, improvement pads.
+# These drape on terrain in the real game — our renderer does the same.
+DECALS_DECALPACK = {
+    "crops_europe_01_d.dds", "crops_europe_02_d.dds", "crops_europe_03_d.dds",
+    "crops_europe_04_d.dds", "crops_europe_05_d.dds", "crops_europe_06_d.dds",
+    "crops_europe_07_d.dds", "crops_europe_08_d.dds",
+    "wheat_farm_d.dds",
+    "riverbank_d.dds", "riverbank_d_endcap1.dds", "riverbank_d_endcap2.dds",
+    "roadsandrails_d.dds", "roads_rails.dds",
+    "floodplains_d.dds",
+    "tree_shadow_2.dds",
+}
+
+DECALS_IMPROVEMENTS = {
+    "ancient_farm_decal_d.dds", "modern_farm_decal_diff.dds",
+    "fort_mid_decal_d.dds", "lumbermill_mid_decal_d.dds",
+    "med_trading_post_decal_diff.dds", "mod_trading_post_decal_d.dds",
+    "anc_academy_decal_d.dds", "ind_academy_decal_d.dds",
+    "citadel_decal_anc_d.dds", "anc_customs_house_decal_d.dds",
+    "med_manufactory_decal_d.dds", "ind_manufactory_decal_diff.dds",
+    "landmark_decal_euro_d.dds", "oil_rig_decal_d.dds",
+}
+
+
+def extract_decals(root: Path) -> None:
+    """Extract ground decals into public/textures/civ5/decal/."""
+    out = OUT / "decal"
+    packs = [
+        (root / "Assets/Resource/DX9/DecalTextures.fpk", DECALS_DECALPACK),
+        (root / "Assets/Resource/DX9/ImprovementTextures.fpk", DECALS_IMPROVEMENTS),
+    ]
+    for fpk_path, want in packs:
+        print(fpk_path.name + " (decals)")
+        if not fpk_path.exists():
+            print(f"  missing {fpk_path}")
+            continue
+        data = fpk_path.read_bytes()
+        entries = {n.lower(): (s, o) for n, s, o in parse_fpk_exact(data)}
+        wrote = 0
+        for name in sorted(want):
+            hit = entries.get(name)
+            if not hit:
+                print(f"  missing {name}")
+                continue
+            size, offset = hit
+            write_dds_or_blob(name, data[offset : offset + size], out)
+            wrote += 1
+        print(f"  wrote {wrote}/{len(want)}")
+
+
+def extract_sv_art(root: Path) -> None:
+    """Extract strategic-view sprites into public/textures/civ5/sv/."""
+    out = OUT / "sv"
+    packs = [
+        (root / "Assets/Resource/DX9/StrategicViewTextures.fpk", SV_BASE),
+        (root / "Assets/Resource/DX9/Expansion1UITextures.fpk", SV_EXP1),
+    ]
+    for fpk_path, want in packs:
+        print(fpk_path.name + " (sv art)")
+        if not fpk_path.exists():
+            print(f"  missing {fpk_path}")
+            continue
+        data = fpk_path.read_bytes()
+        entries = {n.lower(): (s, o) for n, s, o in parse_fpk_exact(data)}
+        wrote = 0
+        for name in sorted(want):
+            hit = entries.get(name)
+            if not hit:
+                print(f"  missing {name}")
+                continue
+            size, offset = hit
+            write_dds_or_blob(name, data[offset : offset + size], out)
+            wrote += 1
+        print(f"  wrote {wrote}/{len(want)}")
+
+
 def main() -> None:
     root = Path(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_STEAM
     if not root.exists():
@@ -289,6 +438,12 @@ def main() -> None:
             print(f"  missing piece {folder}/{filename}")
             continue
         decode_piece_height_r8(src, OUT / f"{stem}.png")
+
+    # 4) Strategic-view sprites (resources / improvements / wonders / cities)
+    extract_sv_art(root)
+
+    # 5) Ground decals (crop fields, riverbanks, roads, improvement pads)
+    extract_decals(root)
 
     print(f"done → {OUT}")
 

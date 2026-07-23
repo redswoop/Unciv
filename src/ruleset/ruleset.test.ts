@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import {
   baseRulesetForSave,
+  civEra,
   isMilitaryUnit,
+  isWorldWonder,
   readRulesetFromDisk,
   resolveNation,
   resolveTerrain,
@@ -73,5 +75,34 @@ describe("resolver against the REAL save", () => {
     // 2021 nations vs master Nations.json — expect the vast majority to resolve
     expect(resolved).toBeGreaterThan(30);
     expect(missing).toBeLessThan(10);
+  });
+});
+
+describe("era + wonders (Techs.json / Buildings.json)", () => {
+  test("civEra tracks the furthest researched column", async () => {
+    const rs = await readRulesetFromDisk("Civ V - Gods & Kings", RULESET_DIR);
+    expect(rs.eraOrder[0]).toBe("Ancient era");
+    expect(rs.eraOrder.length).toBeGreaterThanOrEqual(6);
+    expect(civEra(rs, ["Agriculture"])).toBe("Ancient era");
+    expect(civEra(rs, ["Agriculture", "Education"])).toBe("Medieval era");
+    expect(civEra(rs, undefined)).toBeUndefined();
+    expect(civEra(rs, ["NotATech"])).toBeUndefined();
+  });
+
+  test("isWorldWonder: world wonders yes, national/regular no", async () => {
+    const rs = await readRulesetFromDisk("Civ V - Gods & Kings", RULESET_DIR);
+    expect(rs.buildings.size).toBeGreaterThan(50);
+    expect(isWorldWonder(rs, "The Oracle")).toBe(true);
+    expect(isWorldWonder(rs, "Stonehenge")).toBe(true);
+    expect(isWorldWonder(rs, "Granary")).toBe(false);
+    expect(isWorldWonder(rs, "Palace")).toBe(false);
+    expect(isWorldWonder(rs, "Nope")).toBe(false);
+  });
+
+  test("techInfo populated for both vendored rulesets", async () => {
+    const v = await readRulesetFromDisk("Civ V - Vanilla", RULESET_DIR);
+    expect(v.techInfo.size).toBeGreaterThan(50);
+    const rs = await readRulesetFromDisk("Civ V - Gods & Kings", RULESET_DIR);
+    expect(rs.techInfo.size).toBeGreaterThan(50);
   });
 });
