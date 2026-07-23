@@ -98,6 +98,12 @@ export interface TerrainLook {
    * (plains ≈ RGB(150,140,75)). Compensates the warm sun + ACES blue drain.
    */
   gain?: [number, number, number];
+  /**
+   * Land-land blend order: at a terrain boundary the HIGHER priority paints
+   * an alpha-fading skirt over the lower one (grass washes into plains, not
+   * the reverse) — how Civ5's continuous ground paint reads at hex borders.
+   */
+  blendPriority?: number;
 }
 
 const LOOKS: Record<string, TerrainLook> = {
@@ -106,6 +112,7 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: ["grass_flat_h.png"],
     hScale: 0.06,
     flat: true,
+    blendPriority: 7,
     gain: [1.03, 1.14, 1.2],
   },
   Plains: {
@@ -113,6 +120,7 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: ["plains_flat_h.png"],
     hScale: 0.06,
     flat: true,
+    blendPriority: 5,
     gain: [1.42, 1.45, 1.34],
   },
   Desert: {
@@ -120,6 +128,7 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: ["desert_flat_h.png"],
     hScale: 0.07,
     flat: true,
+    blendPriority: 2,
     gain: [1.1, 1.1, 1.12],
   },
   Tundra: {
@@ -127,6 +136,7 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: ["tundra_flat_h.png"],
     hScale: 0.07,
     flat: true,
+    blendPriority: 4,
     gain: [1.05, 1.05, 1.12],
   },
   Snow: {
@@ -134,6 +144,7 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: ["generic_snow_h.png"],
     hScale: 0.09,
     flat: true,
+    blendPriority: 3,
     gain: [1.0, 1.0, 1.08],
   },
   Mountain: {
@@ -141,6 +152,7 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: ["mountain_11_h.png", "mountain_12_h.png", "mountain_21_h.png"],
     hScale: 0.88,
     flat: false,
+    blendPriority: 8,
   },
   Coast: {
     digimap: "euro_coast_d.png",
@@ -168,18 +180,21 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: [],
     hScale: 0.05,
     flat: true,
+    blendPriority: 6,
   },
   "Flood plains": {
     digimap: "euro_plain_d.png",
     heights: [],
     hScale: 0.05,
     flat: true,
+    blendPriority: 5,
   },
   Ice: {
     digimap: "generic_snow_d.png",
     heights: [],
     hScale: 0.04,
     flat: true,
+    blendPriority: 3,
   },
   Atoll: {
     digimap: "euro_coast_d.png",
@@ -226,6 +241,7 @@ export function lookFor(base: string, features: string[]): TerrainLook {
       hScale: 0.48,
       flat: false,
       gain: baseLook.gain,
+      blendPriority: baseLook.blendPriority,
     };
   }
   return baseLook;
@@ -681,6 +697,19 @@ function buildShadowStamp(maskImg: HTMLImageElement): THREE.Texture {
   return tex;
 }
 
+/**
+ * Continuous world-space noise in [0,1] for blend-fringe modulation — the
+ * reach of a terrain wash varies along the boundary so edges read organic,
+ * never as a straight banded frame.
+ */
+function blendNoise01(x: number, y: number): number {
+  const n =
+    Math.sin(x * 2.3 + y * 1.7) +
+    Math.sin(x * 5.1 - y * 3.3) * 0.5 +
+    Math.sin(y * 7.7 + x * 0.9) * 0.25;
+  return 0.5 + (n / 1.75) * 0.5;
+}
+
 /** Matches scene.ts sun.position (0.85,-0.7,0.55) normalized. */
 const SHADE_L: [number, number, number] = [0.69, -0.568, 0.446];
 /** dot(L, up) — flat ground shades to exactly 1 so calibration holds. */
@@ -940,7 +969,130 @@ export class Civ5TileKit {
       group.add(new THREE.Mesh(geo, mat));
     }
 
+    // land-land terrain blending (Civ5-style continuous ground wash)
+    group.add(await this.buildBlendSkirts(tiles));
+
     await this.addFeatureLayers(group, tiles, foliage);
+    return group;
+  }
+
+  /**
+   * Where two land digimaps meet, the higher blendPriority terrain paints an
+   * alpha-fading skirt over its neighbour in continuous world UV — grass
+   * washes into plains over ~half a hex instead of stopping at the hex edge.
+   * Reach is noise-modulated so the fringe reads organic, and heights/shade
+   * are sampled from the NEIGHBOUR's surface so the wash lies on its ground.
+   */
+  private async buildBlendSkirts(tiles: Civ5TileSpec[]): Promise<THREE.Group> {
+    const group = new THREE.Group();
+    const posKey = (x: number, y: number) => `${Math.round(x * 100)}|${Math.round(y * 100)}`;
+    const byPos = new Map<string, Civ5TileSpec>();
+    for (const t of tiles) byPos.set(posKey(t.world.x, t.world.y), t);
+
+    interface Batch {
+      positions: number[];
+      uvs: number[];
+      colors: number[];
+      look: TerrainLook;
+    }
+    const batches = new Map<string, Batch>();
+
+    const E = 8; // segments along the edge
+    const R = 4; // rows across the blend band
+    const DEPTH = 0.55; // how far the wash reaches into the neighbour
+    const EXT = 0.1; // spill past edge ends so 3-way corners are covered
+    const LIFT = 0.004;
+
+    for (const s of tiles) {
+      const lookS = lookFor(s.baseTerrain, s.features);
+      if (lookS.water || lookS.blendPriority === undefined) continue;
+      for (let i = 0; i < 6; i++) {
+        const c1 = this.corners[i]!;
+        const c2 = this.corners[(i + 1) % 6]!;
+        // corner[i]..corner[i+1] bound the edge facing neighbour i;
+        // twice the edge midpoint is that neighbour's center offset
+        const midx = (c1.x + c2.x) / 2;
+        const midy = (c1.y + c2.y) / 2;
+        const n = byPos.get(posKey(s.world.x + midx * 2, s.world.y + midy * 2));
+        if (!n) continue;
+        const lookN = lookFor(n.baseTerrain, n.features);
+        if (lookN.water || lookN.digimap === lookS.digimap) continue;
+        if ((lookS.blendPriority ?? 0) <= (lookN.blendPriority ?? 0)) continue;
+
+        const hfN = await this.resolveHf(lookN, n.key);
+        const dlen = Math.hypot(midx, midy);
+        const ox = midx / dlen;
+        const oy = midy / dlen;
+
+        let batch = batches.get(lookS.digimap);
+        if (!batch) {
+          batch = { positions: [], uvs: [], colors: [], look: lookS };
+          batches.set(lookS.digimap, batch);
+        }
+
+        type Pt = { x: number; y: number; z: number; shade: number; a: number };
+        const grid: Pt[][] = [];
+        for (let r = 0; r <= R; r++) {
+          const row: Pt[] = [];
+          for (let e = 0; e <= E; e++) {
+            const t = -EXT + (e / E) * (1 + 2 * EXT);
+            const bx = c1.x + (c2.x - c1.x) * t;
+            const by = c1.y + (c2.y - c1.y) * t;
+            const d = (r / R) * DEPTH;
+            const wx = s.world.x + bx + ox * d;
+            const wy = s.world.y + by + oy * d;
+            const lx = wx - n.world.x;
+            const ly = wy - n.world.y;
+            const hAt = (x: number, y: number) =>
+              terrainHeightAt(n, lookN, hfN, this.corners, x, y);
+            const h0 = hAt(lx, ly);
+            const eps = 0.06;
+            const shade = slopeShade((hAt(lx + eps, ly) - h0) / eps, (hAt(lx, ly + eps) - h0) / eps);
+            // organic reach: noise stretches/shrinks the wash along the edge
+            const m = Math.min(1.35, 0.55 + 0.9 * blendNoise01(wx, wy));
+            const f = r / R / m;
+            const a = f >= 1 ? 0 : Math.pow(1 - f, 1.4);
+            row.push({ x: wx, y: wy, z: h0 + LIFT, shade, a });
+          }
+          grid.push(row);
+        }
+        for (let r = 0; r < R; r++) {
+          for (let e = 0; e < E; e++) {
+            const q = [grid[r]![e]!, grid[r]![e + 1]!, grid[r + 1]![e]!, grid[r + 1]![e + 1]!];
+            for (const idx of [0, 1, 2, 2, 1, 3] as const) {
+              const v = q[idx]!;
+              batch.positions.push(v.x, v.y, v.z);
+              batch.uvs.push(v.x * DIGIMAP_UV, v.y * DIGIMAP_UV);
+              batch.colors.push(v.shade, v.shade, v.shade, v.a);
+            }
+          }
+        }
+      }
+    }
+
+    for (const [digi, b] of batches) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(b.positions), 3));
+      geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(b.uvs), 2));
+      geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(b.colors), 4));
+      geo.computeVertexNormals();
+      const map = await this.digimap(digi);
+      const mesh = new THREE.Mesh(
+        geo,
+        new THREE.MeshLambertMaterial({
+          map,
+          color: new THREE.Color(...(b.look.gain ?? [1.05, 1.05, 1.05])),
+          transparent: true,
+          vertexColors: true,
+          depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -1,
+          polygonOffsetUnits: -1,
+        }),
+      );
+      mesh.renderOrder = 0.5;
+      group.add(mesh);
+    }
     return group;
   }
 

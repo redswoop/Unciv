@@ -71,6 +71,30 @@ describe("civ5 tile kit: the four core land looks are pinned", () => {
   });
 });
 
+describe("civ5 tile kit: land-land blend priorities", () => {
+  test("every land terrain has a blend priority; water has none", () => {
+    for (const base of knownTerrains()) {
+      const look = lookFor(base, []);
+      if (look.water) expect(look.blendPriority).toBeUndefined();
+      else expect(look.blendPriority).toBeGreaterThan(0);
+    }
+  });
+
+  test("wash direction is Civ5-like: grass over plains over desert", () => {
+    const pri = (b: string) => lookFor(b, []).blendPriority!;
+    expect(pri("Grassland")).toBeGreaterThan(pri("Plains"));
+    expect(pri("Plains")).toBeGreaterThan(pri("Desert"));
+    expect(pri("Tundra")).toBeGreaterThan(pri("Snow"));
+    expect(pri("Mountain")).toBeGreaterThan(pri("Grassland"));
+  });
+
+  test("hills inherit the base terrain's priority (same wash as flat)", () => {
+    expect(lookFor("Grassland", ["Hill"]).blendPriority).toBe(
+      lookFor("Grassland", []).blendPriority!,
+    );
+  });
+});
+
 describe("civ5 tile kit against the REAL turn-518 save", () => {
   test("every base terrain in the save has an explicit look (no fallback)", () => {
     const known = new Set(knownTerrains());
