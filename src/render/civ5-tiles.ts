@@ -82,7 +82,7 @@ export interface Civ5TileSpec {
 /** full = whole map (lighter); detail = chunk; hero = single-tile showcase density */
 export type FoliageQuality = "full" | "detail" | "hero";
 
-interface TerrainLook {
+export interface TerrainLook {
   digimap: string;
   /** piece height PNGs; empty → flat */
   heights: string[];
@@ -91,6 +91,13 @@ interface TerrainLook {
   /** if true, treat constant-196 flat pieces as zero relief */
   flat: boolean;
   water?: boolean;
+  /**
+   * Linear-space RGB gain applied as material color. Calibrated so the
+   * rendered ground ≈ source digimap × 0.75 with channel ratios preserved —
+   * matching how flat open ground reads in the real Civ5 frame capture
+   * (plains ≈ RGB(150,140,75)). Compensates the warm sun + ACES blue drain.
+   */
+  gain?: [number, number, number];
 }
 
 const LOOKS: Record<string, TerrainLook> = {
@@ -99,30 +106,35 @@ const LOOKS: Record<string, TerrainLook> = {
     heights: ["grass_flat_h.png"],
     hScale: 0.06,
     flat: true,
+    gain: [1.03, 1.14, 1.2],
   },
   Plains: {
     digimap: "euro_plain_d.png",
     heights: ["plains_flat_h.png"],
     hScale: 0.06,
     flat: true,
+    gain: [1.42, 1.45, 1.34],
   },
   Desert: {
     digimap: "euro_desert_d.png",
     heights: ["desert_flat_h.png"],
     hScale: 0.07,
     flat: true,
+    gain: [1.1, 1.1, 1.12],
   },
   Tundra: {
     digimap: "euro_tundra_d.png",
     heights: ["tundra_flat_h.png"],
     hScale: 0.07,
     flat: true,
+    gain: [1.05, 1.05, 1.12],
   },
   Snow: {
     digimap: "generic_snow_d.png",
     heights: ["generic_snow_h.png"],
     hScale: 0.09,
     flat: true,
+    gain: [1.0, 1.0, 1.08],
   },
   Mountain: {
     digimap: "euro_mountain_base_d.png",
@@ -197,7 +209,12 @@ function hash01(key: string, salt: number): number {
   return (hashKey(`${key}|${salt}`) >>> 0) / 0x100000000;
 }
 
-function lookFor(base: string, features: string[]): TerrainLook {
+/** Known base terrains — exported so tests can assert save coverage. */
+export function knownTerrains(): string[] {
+  return Object.keys(LOOKS);
+}
+
+export function lookFor(base: string, features: string[]): TerrainLook {
   const baseLook = LOOKS[base] ?? LOOKS.Plains!;
   const hasHill = features.includes("Hill");
   if (hasHill && base !== "Mountain") {
@@ -208,6 +225,7 @@ function lookFor(base: string, features: string[]): TerrainLook {
       // broad rolling hill, not a tent spike
       hScale: 0.48,
       flat: false,
+      gain: baseLook.gain,
     };
   }
   return baseLook;
@@ -320,7 +338,7 @@ export function terrainHeightAt(
     }
     // Firaxis hill/mountain shape as high-freq detail on welded base
     const detail = piece - FLAT_Z;
-    return base + detail * 0.55;
+    return base + detail * 0.8;
   }
   return look.water ? 0 : piece;
 }
@@ -663,6 +681,26 @@ function buildShadowStamp(maskImg: HTMLImageElement): THREE.Texture {
   return tex;
 }
 
+/** Matches scene.ts sun.position (0.85,-0.7,0.55) normalized. */
+const SHADE_L: [number, number, number] = [0.69, -0.568, 0.446];
+/** dot(L, up) — flat ground shades to exactly 1 so calibration holds. */
+const SHADE_FLAT = SHADE_L[2];
+
+/**
+ * Baked slope shading from the smooth height-field gradient. Civ5 hills read
+ * mainly through strong directional shading; Lambert at our sun angle is too
+ * soft, so we bake extra contrast into vertex colors. Sampled per VERTEX
+ * (finite differences), not per face — face normals at low tessellation read
+ * as shattered triangular shards. 1 on flat ground, brighter on sun-facing
+ * slopes, darker on back slopes.
+ */
+function slopeShade(dzdx: number, dzdy: number): number {
+  const len = Math.hypot(dzdx, dzdy, 1);
+  const dot = (-dzdx * SHADE_L[0] - dzdy * SHADE_L[1] + SHADE_L[2]) / len;
+  const shade = 1 + 1.5 * (dot - SHADE_FLAT);
+  return Math.min(1.3, Math.max(0.6, shade));
+}
+
 export class Civ5TileKit {
   private digimapCache = new Map<string, THREE.Texture>();
   private heightCache = new Map<string, HeightField | null>();
@@ -713,7 +751,7 @@ export class Civ5TileKit {
   /**
    * Load digimap albedo. Civ5 digimaps store non-color data in alpha (~60–90);
    * that channel is NOT opacity — treating it as such muddies grass. Bake
-   * A=255 + a light green lift before the texture is ever sampled.
+   * A=255; color stays untouched (per-terrain calibration lives in look.gain).
    */
   private async digimap(file: string): Promise<THREE.Texture> {
     const cached = this.digimapCache.get(file);
@@ -735,16 +773,6 @@ export class Civ5TileKit {
     const id = ctx.getImageData(0, 0, c.width, c.height);
     const d = id.data;
     for (let i = 0; i < d.length; i += 4) {
-      let r = d[i]!;
-      let g = d[i + 1]!;
-      let b = d[i + 2]!;
-      // digimaps skew olive-brown; lift green midtones toward living grass
-      g = Math.min(255, g * 1.08 + 6);
-      r = Math.min(255, r * 1.03 + 3);
-      b = Math.min(255, b * 0.97);
-      d[i] = r;
-      d[i + 1] = g;
-      d[i + 2] = b;
       d[i + 3] = 255;
     }
     ctx.putImageData(id, 0, 0);
@@ -832,8 +860,10 @@ export class Civ5TileKit {
       const tPer = 6 * divs * divs;
       const positions = new Float32Array(specs.length * tPer * 9);
       const uvs = new Float32Array(specs.length * tPer * 6);
+      const colors = new Float32Array(specs.length * tPer * 9);
       let p = 0;
       let u = 0;
+      let cw = 0;
 
       for (const s of specs) {
         const hf = hfByKey.get(s.key) ?? null;
@@ -843,11 +873,21 @@ export class Civ5TileKit {
         for (let sec = 0; sec < 6; sec++) {
           const a = this.corners[sec]!;
           const b = this.corners[(sec + 1) % 6]!;
-          const point = (i: number, j: number): [number, number, number] => {
+          const point = (i: number, j: number): [number, number, number, number] => {
             const lx = ((i * a.x + j * b.x) / divs) * OVERLAP;
             const ly = ((i * a.y + j * b.y) / divs) * OVERLAP;
-            const z = terrainHeightAt(s, look, hf, this.corners, lx / OVERLAP, ly / OVERLAP);
-            return [cx + lx, cy + ly, z];
+            const hAt = (x: number, y: number) =>
+              terrainHeightAt(s, look, hf, this.corners, x, y);
+            const z = hAt(lx / OVERLAP, ly / OVERLAP);
+            let shade = 1;
+            if (!look.water) {
+              // smooth hillshade from the height gradient (see slopeShade)
+              const e = 0.06;
+              const dzdx = (hAt(lx / OVERLAP + e, ly / OVERLAP) - z) / e;
+              const dzdy = (hAt(lx / OVERLAP, ly / OVERLAP + e) - z) / e;
+              shade = slopeShade(dzdx, dzdy);
+            }
+            return [cx + lx, cy + ly, z, shade];
           };
           for (let i = 0; i < divs; i++) {
             for (let j = 0; j < divs - i; j++) {
@@ -857,12 +897,15 @@ export class Civ5TileKit {
                   [i1, j1],
                   [i2, j2],
                 ] as const) {
-                  const [x, y, z] = point(ii, jj);
+                  const [x, y, z, shade] = point(ii, jj);
                   positions[p++] = x;
                   positions[p++] = y;
                   positions[p++] = z;
                   uvs[u++] = x * DIGIMAP_UV;
                   uvs[u++] = y * DIGIMAP_UV;
+                  colors[cw++] = shade;
+                  colors[cw++] = shade;
+                  colors[cw++] = shade;
                 }
               };
               emit(i, j, i, j + 1, i + 1, j);
@@ -875,6 +918,7 @@ export class Civ5TileKit {
       const geo = new THREE.BufferGeometry();
       geo.setAttribute("position", new THREE.BufferAttribute(positions, 3));
       geo.setAttribute("uv", new THREE.BufferAttribute(uvs, 2));
+      geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
       geo.computeVertexNormals();
 
       const map = await this.digimap(digi);
@@ -887,8 +931,10 @@ export class Civ5TileKit {
           })
         : new THREE.MeshLambertMaterial({
             map,
-            // slight warm lift — digimaps skew dark under Lambert+ACES
-            color: new THREE.Color(0xf4f6ec),
+            // calibrated per-terrain gain (see TerrainLook.gain)
+            color: new THREE.Color(...(look.gain ?? [1.05, 1.05, 1.05])),
+            // baked hillshade lives in vertex colors
+            vertexColors: true,
           });
 
       group.add(new THREE.Mesh(geo, mat));

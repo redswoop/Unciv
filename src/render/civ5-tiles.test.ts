@@ -1,0 +1,112 @@
+import { beforeAll, describe, expect, test } from "bun:test";
+import { join } from "node:path";
+import { buildBoardModel, type BoardModel } from "./board-model";
+import { loadSaveFromFile } from "../save/load-save";
+import { baseRulesetForSave, readRulesetFromDisk } from "../ruleset/ruleset";
+import { hexCornerVectors } from "../hex/hex-math";
+import { knownTerrains, lookFor } from "./civ5-tiles";
+
+const RULESET_DIR = join(import.meta.dir, "../../public/rulesets");
+const SAVE = join(import.meta.dir, "../../public/saves/turn518-14civs.unciv");
+
+let model: BoardModel;
+
+beforeAll(async () => {
+  const game = await loadSaveFromFile(SAVE);
+  const ruleset = await readRulesetFromDisk(baseRulesetForSave(game), RULESET_DIR);
+  model = buildBoardModel(game, ruleset, hexCornerVectors());
+});
+
+describe("civ5 tile kit: the four core land looks are pinned", () => {
+  test("flat Grassland = green digimap + flat piece", () => {
+    const look = lookFor("Grassland", []);
+    expect(look.digimap).toBe("euro_grassland_d.png");
+    expect(look.heights).toEqual(["grass_flat_h.png"]);
+    expect(look.flat).toBe(true);
+    expect(look.water).toBeUndefined();
+  });
+
+  test("flat Plains = brown digimap + flat piece", () => {
+    const look = lookFor("Plains", []);
+    expect(look.digimap).toBe("euro_plain_d.png");
+    expect(look.heights).toEqual(["plains_flat_h.png"]);
+    expect(look.flat).toBe(true);
+  });
+
+  test("Grassland+Hill = SAME green digimap, hill relief pieces", () => {
+    const look = lookFor("Grassland", ["Hill"]);
+    expect(look.digimap).toBe("euro_grassland_d.png");
+    expect(look.heights).toEqual([
+      "grass_hill_01_h.png",
+      "grass_hill_02_h.png",
+      "grass_hill_21_h.png",
+    ]);
+    expect(look.flat).toBe(false);
+    expect(look.hScale).toBeGreaterThan(0.2); // must visibly read as a hill
+  });
+
+  test("Plains+Hill = SAME brown digimap, hill relief pieces", () => {
+    const look = lookFor("Plains", ["Hill"]);
+    expect(look.digimap).toBe("euro_plain_d.png");
+    expect(look.heights).toEqual([
+      "plains_hill_01_h.png",
+      "plains_hill_02_h.png",
+      "plains_hill_21_h.png",
+    ]);
+    expect(look.flat).toBe(false);
+  });
+
+  test("hills never change the ground paint, only the relief", () => {
+    for (const base of ["Grassland", "Plains", "Desert", "Tundra", "Snow"]) {
+      expect(lookFor(base, ["Hill"]).digimap).toBe(lookFor(base, []).digimap);
+      expect(lookFor(base, ["Hill"]).flat).toBe(false);
+    }
+  });
+
+  test("non-Hill features never change the base look", () => {
+    const plain = lookFor("Grassland", []);
+    for (const f of [["Forest"], ["Jungle"], ["Marsh"], ["Fallout"], ["Oasis"]]) {
+      expect(lookFor("Grassland", f)).toEqual(plain);
+    }
+  });
+});
+
+describe("civ5 tile kit against the REAL turn-518 save", () => {
+  test("every base terrain in the save has an explicit look (no fallback)", () => {
+    const known = new Set(knownTerrains());
+    const missing = new Set<string>();
+    for (const t of model.tiles) {
+      if (!known.has(t.baseTerrain)) missing.add(t.baseTerrain);
+    }
+    expect([...missing]).toEqual([]);
+  });
+
+  test("all four core combos actually occur on this map", () => {
+    const combos = new Set<string>();
+    for (const t of model.tiles) {
+      if (t.baseTerrain !== "Grassland" && t.baseTerrain !== "Plains") continue;
+      combos.add(`${t.baseTerrain}|${t.features.includes("Hill") ? "hill" : "flat"}`);
+    }
+    expect([...combos].sort()).toEqual([
+      "Grassland|flat",
+      "Grassland|hill",
+      "Plains|flat",
+      "Plains|hill",
+    ]);
+  });
+
+  test("extracted assets exist for every look used by this save", async () => {
+    const dir = join(import.meta.dir, "../../public/textures/civ5");
+    const files = new Set<string>();
+    for (const t of model.tiles) {
+      const look = lookFor(t.baseTerrain, t.features);
+      files.add(look.digimap);
+      for (const h of look.heights) files.add(h);
+    }
+    const missing: string[] = [];
+    for (const f of files) {
+      if (!(await Bun.file(join(dir, f)).exists())) missing.push(f);
+    }
+    expect(missing).toEqual([]);
+  });
+});
