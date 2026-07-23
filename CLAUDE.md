@@ -71,7 +71,14 @@ save file (base64+gzip, libGDX JSON)
 Camera FOV 16°, tilt 0.9. Full map uses **Firaxis digimaps + piece heightmaps**
 when `public/textures/civ5/` exists (`python3 cli/extract-civ5-assets.py` from
 local Steam Civ5); otherwise Artful fallback. Kit: `src/render/civ5-tiles.ts`.
-Chunk/hero demos: `/chunk.html`, `/hero.html`. Remaining gaps:
+Chunk/hero demos: `/chunk.html`, `/hero.html`.
+
+Done: core land looks locked (grass/plains/desert/tundra/snow, flat + hill)
+with per-terrain `TerrainLook.gain` calibrated vs the real frame capture
+(rendered ground = source digimap × 0.75, ratios preserved — recalibrate gains
+if lighting/tone mapping changes), smooth per-vertex baked hillshade, and
+priority-ordered land-land blend skirts (higher `blendPriority` washes over
+lower; all pinned in `civ5-tiles.test.ts`). Remaining gaps:
 
 1. **City banners are world-scaled sprites** — monstrous when zoomed in,
    overlapping when zoomed out. Fix: screen-space size cap (scale sprites by
@@ -85,9 +92,11 @@ Chunk/hero demos: `/chunk.html`, `/hero.html`. Remaining gaps:
    midpoints (curve via city/tile centers) would read far better.
 4. **Unit markers are letter-initial billboards.** Even Civ5-style flag pins
    (pole + banner icon shape) would read better; unit-type icon atlas later.
-5. **Water is flat opaque.** Cheap wins: animated normal-ish shimmer shader,
-   coast-to-ocean gradient using the Artful depth LUT (already sampled in
-   `cli/generate-textures.ts`), subtle foam ring on coastlines.
+5. **Water is flat opaque, and land↔water edges are hard hex cliffs** — the
+   biggest remaining seam class now that land-land blends. Beach/foam wash at
+   coastlines + animated shimmer; coast-to-ocean gradient using the Artful
+   depth LUT (already sampled in `cli/generate-textures.ts`); `waterbumps` /
+   `waterdepthcolor` textures are already extracted.
 6. **No fog of war** — everything is visible. Save carries per-civ
    `exploredTiles`; a "view as civ X" toggle + darkened unexplored tiles is
    pure board-model work.
