@@ -305,31 +305,66 @@ export interface HeightField {
   flat: boolean;
 }
 
-/** Tiny deterministic micro-relief so flat digimap land isn't a plastic sheet. */
-function microRelief(lx: number, ly: number): number {
-  // cheap value-noise-ish from coordinates
-  const n1 = Math.sin(lx * 7.1 + ly * 5.3) * Math.cos(lx * 3.7 - ly * 6.2);
-  const n2 = Math.sin(lx * 13.0 - ly * 11.0) * 0.35;
-  return (n1 + n2) * 0.012;
+function hashLattice(ix: number, iy: number): number {
+  let h = Math.imul(ix, 374761393) ^ Math.imul(iy, 668265263);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 0x100000000;
+}
+
+/** Smooth 2D value noise in [0,1) on an integer lattice. */
+function valueNoise(x: number, y: number): number {
+  const x0 = Math.floor(x);
+  const y0 = Math.floor(y);
+  const fx = x - x0;
+  const fy = y - y0;
+  const sx = fx * fx * (3 - 2 * fx);
+  const sy = fy * fy * (3 - 2 * fy);
+  const a = hashLattice(x0, y0);
+  const b = hashLattice(x0 + 1, y0);
+  const c = hashLattice(x0, y0 + 1);
+  const d = hashLattice(x0 + 1, y0 + 1);
+  return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+}
+
+/**
+ * Tiny deterministic micro-relief so flat digimap land isn't a plastic sheet.
+ * Takes WORLD coordinates: sine waves in tile-local space stamped the same
+ * interference pattern on every tile, which the baked hillshade turned into a
+ * regular ripple marching across whole plains. World-space value noise is
+ * aperiodic and continuous across tile borders.
+ */
+function microRelief(wx: number, wy: number): number {
+  const n =
+    valueNoise(wx * 1.7, wy * 1.7) * 0.65 +
+    valueNoise(wx * 4.3 + 31.7, wy * 4.3 - 17.3) * 0.35;
+  return (n - 0.5) * 0.022;
 }
 
 /**
  * Sample piece heightmap in local hex space. Rim soft-falls to FLAT_Z so
  * adjacent tiles meet without cliffs. Flat pieces get subtle micro-relief.
+ * wx/wy are world coordinates for the micro-relief noise (default to local
+ * for standalone use).
  */
-export function sampleHeight(hf: HeightField | null, lx: number, ly: number): number {
-  if (!hf || hf.flat) return FLAT_Z + microRelief(lx, ly);
+export function sampleHeight(
+  hf: HeightField | null,
+  lx: number,
+  ly: number,
+  wx: number = lx,
+  wy: number = ly,
+): number {
+  if (!hf || hf.flat) return FLAT_Z + microRelief(wx, wy);
   const [u, v] = localToUV(lx, ly);
   const raw = sampleR8(hf.data, hf.w, hf.h, u, v);
   // constant-196 flat sentinels (flat piece maps)
-  if (raw > 180) return FLAT_Z + microRelief(lx, ly);
+  if (raw > 180) return FLAT_Z + microRelief(wx, wy);
   let z = (Math.max(0, raw - H_BASE) / (255 - H_BASE)) * hf.hScale;
   const r = Math.hypot(lx, ly);
   // start falloff earlier so hills blend into neighbours instead of mesa edges
   if (r > 0.58) {
     const t = Math.min(1, (r - 0.58) / 0.42);
     const s = t * t * (3 - 2 * t);
-    z = z * (1 - s) + (FLAT_Z + microRelief(lx, ly) * 0.3) * s;
+    z = z * (1 - s) + (FLAT_Z + microRelief(wx, wy) * 0.3) * s;
   }
   return z;
 }
@@ -346,7 +381,7 @@ export function terrainHeightAt(
   lx: number,
   ly: number,
 ): number {
-  const piece = sampleHeight(hf, lx, ly);
+  const piece = sampleHeight(hf, lx, ly, s.world.x + lx, s.world.y + ly);
   if (s.cornerHeights && s.height !== undefined) {
     const base = heightAtLocal(s.height, s.cornerHeights, corners, { x: lx, y: ly });
     if (look.water) return 0;
